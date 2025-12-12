@@ -1,6 +1,6 @@
-diff -ruN src_origin/fs/hymofs.c src_modified/fs/hymofs.c
---- src_origin/fs/hymofs.c	1970-01-01 08:00:00.000000000 +0800
-+++ src_modified/fs/hymofs.c	2025-12-12 13:47:35.806907713 +0800
+diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
+--- src_origin_with_susfs/fs/hymofs.c	1970-01-01 08:00:00.000000000 +0800
++++ src_modified_with_susfs/fs/hymofs.c	2025-12-12 13:47:35.806907713 +0800
 @@ -0,0 +1,686 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
@@ -688,9 +688,9 @@ diff -ruN src_origin/fs/hymofs.c src_modified/fs/hymofs.c
 +EXPORT_SYMBOL(hymofs_spoof_stat);
 +
 +#endif /* CONFIG_HYMOFS */
-diff -ruN src_origin/fs/hymofs.h src_modified/fs/hymofs.h
---- src_origin/fs/hymofs.h	1970-01-01 08:00:00.000000000 +0800
-+++ src_modified/fs/hymofs.h	2025-12-12 12:06:41.213892671 +0800
+diff -ruN src_origin_with_susfs/fs/hymofs.h src_modified_with_susfs/fs/hymofs.h
+--- src_origin_with_susfs/fs/hymofs.h	1970-01-01 08:00:00.000000000 +0800
++++ src_modified_with_susfs/fs/hymofs.h	2025-12-12 12:06:41.535428520 +0800
 @@ -0,0 +1,96 @@
 +#ifndef _LINUX_HYMOFS_H
 +#define _LINUX_HYMOFS_H
@@ -788,9 +788,9 @@ diff -ruN src_origin/fs/hymofs.h src_modified/fs/hymofs.h
 +#endif /* CONFIG_HYMOFS */
 +
 +#endif /* _LINUX_HYMOFS_H */
-diff -ruN src_origin/fs/Kconfig src_modified/fs/Kconfig
---- src_origin/fs/Kconfig	2025-12-11 05:57:54.073146169 +0800
-+++ src_modified/fs/Kconfig	2025-12-11 05:57:54.067862304 +0800
+diff -ruN src_origin_with_susfs/fs/Kconfig src_modified_with_susfs/fs/Kconfig
+--- src_origin_with_susfs/fs/Kconfig	2025-12-11 05:57:54.074927137 +0800
++++ src_modified_with_susfs/fs/Kconfig	2025-12-11 05:57:54.069979232 +0800
 @@ -405,4 +405,10 @@
  config IO_WQ
  	bool
@@ -802,32 +802,32 @@ diff -ruN src_origin/fs/Kconfig src_modified/fs/Kconfig
 +	  HymoFS is a kernel-level path manipulation and hiding framework.
 +
  endmenu
-diff -ruN src_origin/fs/Makefile src_modified/fs/Makefile
---- src_origin/fs/Makefile	2025-12-12 07:38:53.496997243 +0800
-+++ src_modified/fs/Makefile	2025-12-12 07:42:33.493271995 +0800
-@@ -22,6 +22,8 @@
- 		fs_types.o fs_context.o fs_parser.o fsopen.o init.o \
+diff -ruN src_origin_with_susfs/fs/Makefile src_modified_with_susfs/fs/Makefile
+--- src_origin_with_susfs/fs/Makefile	2025-12-12 02:01:35.293595985 +0800
++++ src_modified_with_susfs/fs/Makefile	2025-12-12 07:42:31.263192253 +0800
+@@ -23,6 +23,7 @@
  		kernel_read_file.o mnt_idmapping.o remap_range.o
  
+ obj-$(CONFIG_KSU_SUSFS) += susfs.o
 +obj-$(CONFIG_HYMOFS) += hymofs.o
-+
+ 
  obj-$(CONFIG_BUFFER_HEAD)	+= buffer.o mpage.o
  obj-$(CONFIG_PROC_FS)		+= proc_namespace.o
- obj-$(CONFIG_LEGACY_DIRECT_IO)	+= direct-io.o
-diff -ruN src_origin/fs/namei.c src_modified/fs/namei.c
---- src_origin/fs/namei.c	2025-12-11 05:57:54.073576440 +0800
-+++ src_modified/fs/namei.c	2025-12-12 04:03:33.110348229 +0800
-@@ -44,6 +44,9 @@
+diff -ruN src_origin_with_susfs/fs/namei.c src_modified_with_susfs/fs/namei.c
+--- src_origin_with_susfs/fs/namei.c	2025-12-11 05:57:54.075407183 +0800
++++ src_modified_with_susfs/fs/namei.c	2025-12-12 04:03:39.535007379 +0800
+@@ -57,6 +57,10 @@
+ extern const struct qstr susfs_fake_qstr_name;
+ #endif
  
- #include "internal.h"
- #include "mount.h"
 +#ifdef CONFIG_HYMOFS
 +#include "hymofs.h"
 +#endif
- 
++
  /* [Feb-1997 T. Schoebel-Theuer]
   * Fundamental changes in the pathname lookup mechanisms (namei)
-@@ -126,8 +129,21 @@
+  * were necessary because of omirr.  The reason is that omirr needs
+@@ -138,8 +142,21 @@
  
  #define EMBEDDED_NAME_MAX	(PATH_MAX - offsetof(struct filename, iname))
  
@@ -849,20 +849,22 @@ diff -ruN src_origin/fs/namei.c src_modified/fs/namei.c
  {
  	struct filename *result;
  	char *kname;
-diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
---- src_origin/fs/readdir.c	2025-12-11 05:57:54.074048656 +0800
-+++ src_modified/fs/readdir.c	2025-12-12 04:09:49.079473795 +0800
-@@ -23,6 +23,9 @@
- #include <linux/uaccess.h>
- 
- #include <asm/unaligned.h>
+diff -ruN src_origin_with_susfs/fs/readdir.c src_modified_with_susfs/fs/readdir.c
+--- src_origin_with_susfs/fs/readdir.c	2025-12-11 05:57:54.075969120 +0800
++++ src_modified_with_susfs/fs/readdir.c	2025-12-12 04:20:54.849133432 +0800
+@@ -32,6 +32,11 @@
+ extern bool susfs_is_base_dentry_android_data_dir(struct dentry* base);
+ extern bool susfs_is_base_dentry_sdcard_dir(struct dentry* base);
+ #endif
++
 +#ifdef CONFIG_HYMOFS
 +#include "hymofs.h"
 +#endif
- 
++
  /*
   * Some filesystems were never converted to '->iterate_shared()'
-@@ -172,6 +175,9 @@
+  * and their directory iterators want the inode lock held for
+@@ -180,6 +185,9 @@
  
  struct readdir_callback {
  	struct dir_context ctx;
@@ -870,9 +872,9 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +	struct hymo_readdir_context hymo;
 +#endif
  	struct old_linux_dirent __user * dirent;
- 	int result;
- };
-@@ -225,11 +231,17 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct super_block *sb;
+@@ -267,6 +275,9 @@
  
  	if (!f.file)
  		return -EBADF;
@@ -880,7 +882,9 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +	hymofs_prepare_readdir(&buf.hymo, f.file);
 +#endif
  
- 	error = iterate_dir(f.file, &buf.ctx);
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+@@ -294,6 +305,9 @@
  	if (buf.result)
  		error = buf.result;
  
@@ -890,7 +894,7 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
  	fdput_pos(f);
  	return error;
  }
-@@ -249,6 +261,9 @@
+@@ -313,6 +327,9 @@
  
  struct getdents_callback {
  	struct dir_context ctx;
@@ -898,19 +902,23 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +	struct hymo_readdir_context hymo;
 +#endif
  	struct linux_dirent __user * current_dir;
- 	int prev_reclen;
- 	int count;
-@@ -266,6 +281,9 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct super_block *sb;
+@@ -335,7 +352,13 @@
+ 	int reclen = ALIGN(offsetof(struct linux_dirent, d_name) + namlen + 2,
  		sizeof(long));
  	int prev_reclen;
- 
++
 +#ifdef CONFIG_HYMOFS
 +    if (hymofs_check_filldir(&buf->hymo, name, strlen(name))) return true;
 +#endif
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
- 		return false;
-@@ -318,6 +336,20 @@
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
++
+ 	struct inode *inode;
+ #endif
+ 
+@@ -417,6 +440,20 @@
  	f = fdget_pos(fd);
  	if (!f.file)
  		return -EBADF;
@@ -929,9 +937,9 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +	}
 +#endif
  
- 	error = iterate_dir(f.file, &buf.ctx);
- 	if (error >= 0)
-@@ -331,12 +363,24 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+@@ -452,12 +489,24 @@
  		else
  			error = count - buf.count;
  	}
@@ -954,19 +962,21 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +	struct hymo_readdir_context hymo;
 +#endif
  	struct linux_dirent64 __user * current_dir;
- 	int prev_reclen;
- 	int count;
-@@ -353,6 +397,9 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct super_block *sb;
+@@ -479,6 +528,11 @@
+ 	int reclen = ALIGN(offsetof(struct linux_dirent64, d_name) + namlen + 1,
  		sizeof(u64));
  	int prev_reclen;
- 
++
 +#ifdef CONFIG_HYMOFS
 +	if (hymofs_check_filldir(&buf->hymo, name, namlen)) return true;
 +#endif
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
- 		return false;
-@@ -402,6 +449,20 @@
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct inode *inode;
+ #endif
+@@ -558,6 +612,21 @@
  	if (!f.file)
  		return -EBADF;
  
@@ -984,10 +994,11 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +		return error;
 +	}
 +#endif
- 	error = iterate_dir(f.file, &buf.ctx);
- 	if (error >= 0)
- 		error = buf.error;
-@@ -415,6 +476,15 @@
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
+@@ -593,6 +662,15 @@
  		else
  			error = count - buf.count;
  	}
@@ -1003,7 +1014,7 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
  	fdput_pos(f);
  	return error;
  }
-@@ -429,6 +499,9 @@
+@@ -607,6 +685,9 @@
  
  struct compat_readdir_callback {
  	struct dir_context ctx;
@@ -1011,16 +1022,20 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +	struct hymo_readdir_context hymo;
 +#endif
  	struct compat_old_linux_dirent __user *dirent;
- 	int result;
- };
-@@ -484,10 +557,16 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct super_block *sb;
+@@ -696,6 +777,10 @@
  	if (!f.file)
  		return -EBADF;
  
 +#ifdef CONFIG_HYMOFS
 +	hymofs_prepare_readdir(&buf.hymo, f.file);
 +#endif
- 	error = iterate_dir(f.file, &buf.ctx);
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
+@@ -722,6 +807,9 @@
  	if (buf.result)
  		error = buf.result;
  
@@ -1030,7 +1045,7 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
  	fdput_pos(f);
  	return error;
  }
-@@ -501,6 +580,9 @@
+@@ -735,6 +823,9 @@
  
  struct compat_getdents_callback {
  	struct dir_context ctx;
@@ -1038,29 +1053,31 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
 +	struct hymo_readdir_context hymo;
 +#endif
  	struct compat_linux_dirent __user *current_dir;
- 	int prev_reclen;
- 	int count;
-@@ -518,6 +600,9 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct super_block *sb;
+@@ -757,6 +848,10 @@
+ 	int reclen = ALIGN(offsetof(struct compat_linux_dirent, d_name) +
  		namlen + 2, sizeof(compat_long_t));
  	int prev_reclen;
- 
++
 +#ifdef CONFIG_HYMOFS
 +    if (hymofs_check_filldir(&buf->hymo, name, namlen)) return true;
 +#endif
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
- 		return false;
-@@ -570,6 +655,9 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	struct inode *inode;
+ #endif
+@@ -838,6 +933,10 @@
  	if (!f.file)
  		return -EBADF;
  
 +#ifdef CONFIG_HYMOFS
 +	hymofs_prepare_readdir(&buf.hymo, f.file);
 +#endif
- 	error = iterate_dir(f.file, &buf.ctx);
- 	if (error >= 0)
- 		error = buf.error;
-@@ -582,6 +670,9 @@
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 	buf.sb = f.file->f_inode->i_sb;
+ 	inode = f.file->f_path.dentry->d_inode;
+@@ -872,6 +971,9 @@
  		else
  			error = count - buf.count;
  	}
@@ -1070,20 +1087,26 @@ diff -ruN src_origin/fs/readdir.c src_modified/fs/readdir.c
  	fdput_pos(f);
  	return error;
  }
-diff -ruN src_origin/fs/stat.c src_modified/fs/stat.c
---- src_origin/fs/stat.c	2025-12-11 05:57:54.074300382 +0800
-+++ src_modified/fs/stat.c	2025-12-12 04:03:39.535007379 +0800
-@@ -25,6 +25,9 @@
- 
+diff -ruN src_origin_with_susfs/fs/stat.c src_modified_with_susfs/fs/stat.c
+--- src_origin_with_susfs/fs/stat.c	2025-12-11 05:57:54.076204296 +0800
++++ src_modified_with_susfs/fs/stat.c	2025-12-12 04:03:39.529007301 +0800
+@@ -30,10 +30,15 @@
  #include "internal.h"
  #include "mount.h"
+ 
++
+ #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+ extern void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat);
+ #endif
+ 
 +#ifdef CONFIG_HYMOFS
 +#include "hymofs.h"
 +#endif
- 
++
  /**
   * generic_fillattr - Fill in the basic attributes from the inode struct
-@@ -137,6 +140,9 @@
+  * @idmap:		idmap of the mount the inode was found from
+@@ -158,6 +163,9 @@
  					    query_flags | AT_GETATTR_NOSEC);
  
  	generic_fillattr(idmap, request_mask, inode, stat);

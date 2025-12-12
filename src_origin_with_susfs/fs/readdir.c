@@ -23,22 +23,15 @@
 #include <linux/uaccess.h>
 
 #include <asm/unaligned.h>
-#ifdef CONFIG_HYMOFS
-#include <linux/namei.h>
-#include <linux/dcache.h>
-#include <linux/slab.h>
-#include <linux/list.h>
-extern bool hymofs_should_hide(const char *pathname);
 
-struct hymo_name_list {
-    char *name;
-    unsigned char type;
-    struct list_head list;
-};
-extern int hymofs_populate_injected_list(const char *dir_path, struct list_head *head);
-#define HYMO_MAGIC_POS 0x7000000000000000ULL
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#include <linux/susfs_def.h>
+extern bool susfs_is_inode_sus_path(struct mnt_idmap *idmap, struct inode *inode);
+extern bool susfs_is_sus_android_data_d_name_found(const char *d_name);
+extern bool susfs_is_sus_sdcard_d_name_found(const char *d_name);
+extern bool susfs_is_base_dentry_android_data_dir(struct dentry* base);
+extern bool susfs_is_base_dentry_sdcard_dir(struct dentry* base);
 #endif
-
 /*
  * Some filesystems were never converted to '->iterate_shared()'
  * and their directory iterators want the inode lock held for
@@ -187,13 +180,13 @@ struct old_linux_dirent {
 
 struct readdir_callback {
 	struct dir_context ctx;
-#ifdef CONFIG_HYMOFS
-	struct file *file;
-	char *path_buf;
-	char *dir_path;
-	int dir_path_len;
-#endif
 	struct old_linux_dirent __user * dirent;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct super_block *sb;
+	struct mnt_idmap *idmap;
+	bool is_base_dentry_android_data_root_dir;
+	bool is_base_dentry_sdcard_root_dir;
+#endif
 	int result;
 };
 
@@ -204,6 +197,9 @@ static bool fillonedir(struct dir_context *ctx, const char *name, int namlen,
 		container_of(ctx, struct readdir_callback, ctx);
 	struct old_linux_dirent __user * dirent;
 	unsigned long d_ino;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
+#endif
 
 	if (buf->result)
 		return false;
@@ -215,6 +211,28 @@ static bool fillonedir(struct dir_context *ctx, const char *name, int namlen,
 		buf->result = -EOVERFLOW;
 		return false;
 	}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (buf->is_base_dentry_android_data_root_dir) {
+		if (susfs_is_sus_android_data_d_name_found(name)) {
+			return true;
+		}
+	} else if (buf->is_base_dentry_sdcard_root_dir) {
+		if (susfs_is_sus_sdcard_d_name_found(name)) {
+			return true;
+		}
+	}
+
+	inode = ilookup(buf->sb, ino);
+	if (!inode) {
+		goto orig_flow;
+	}
+	if (susfs_is_inode_sus_path(buf->idmap, inode)) {
+		iput(inode);
+		return true;
+	}
+	iput(inode);
+orig_flow:
+#endif
 	buf->result++;
 	dirent = buf->dirent;
 	if (!user_write_access_begin(dirent,
@@ -243,34 +261,39 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 		.ctx.actor = fillonedir,
 		.dirent = dirent
 	};
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
+#endif
 
 	if (!f.file)
 		return -EBADF;
-#ifdef CONFIG_HYMOFS
-	buf.file = f.file;
-	buf.path_buf = (char *)__get_free_page(GFP_KERNEL);
-	buf.dir_path = NULL;
-	if (buf.path_buf) {
-		char *p = d_path(&f.file->f_path, buf.path_buf, PAGE_SIZE);
-		if (!IS_ERR(p)) {
-			int len = strlen(p);
-			memmove(buf.path_buf, p, len + 1);
-			buf.dir_path = buf.path_buf;
-			buf.dir_path_len = len;
-		} else {
-			free_page((unsigned long)buf.path_buf);
-			buf.path_buf = NULL;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.sb = f.file->f_inode->i_sb;
+	inode = f.file->f_path.dentry->d_inode;
+	if (f.file->f_path.dentry && inode) {
+		if (susfs_is_base_dentry_android_data_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_android_data_root_dir = true;
+			buf.is_base_dentry_sdcard_root_dir = false;
+			goto orig_flow;
+		}
+		if (susfs_is_base_dentry_sdcard_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_sdcard_root_dir = true;
+			buf.is_base_dentry_android_data_root_dir = false;
+			goto orig_flow;
 		}
 	}
+	buf.is_base_dentry_android_data_root_dir = false;
+	buf.is_base_dentry_sdcard_root_dir = false;
+orig_flow:
+	buf.idmap = mnt_idmap(f.file->f_path.mnt);
 #endif
-
 	error = iterate_dir(f.file, &buf.ctx);
 	if (buf.result)
 		error = buf.result;
 
-#ifdef CONFIG_HYMOFS
-	if (buf.path_buf) free_page((unsigned long)buf.path_buf);
-#endif
 	fdput_pos(f);
 	return error;
 }
@@ -290,13 +313,13 @@ struct linux_dirent {
 
 struct getdents_callback {
 	struct dir_context ctx;
-#ifdef CONFIG_HYMOFS
-	struct file *file;
-	char *path_buf;
-	char *dir_path;
-	int dir_path_len;
-#endif
 	struct linux_dirent __user * current_dir;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct super_block *sb;
+	struct mnt_idmap *idmap;
+	bool is_base_dentry_android_data_root_dir;
+	bool is_base_dentry_sdcard_root_dir;
+#endif
 	int prev_reclen;
 	int count;
 	int error;
@@ -312,19 +335,10 @@ static bool filldir(struct dir_context *ctx, const char *name, int namlen,
 	int reclen = ALIGN(offsetof(struct linux_dirent, d_name) + namlen + 2,
 		sizeof(long));
 	int prev_reclen;
-
-#ifdef CONFIG_HYMOFS
-	if (buf->dir_path) {
-		int name_len = strlen(name);
-		if (buf->dir_path_len + 1 + name_len < PAGE_SIZE) {
-			char *p = buf->path_buf + buf->dir_path_len;
-			if (p > buf->path_buf && p[-1] != '/') *p++ = '/';
-			memcpy(p, name, name_len);
-			p[name_len] = '\0';
-			if (hymofs_should_hide(buf->path_buf)) return true;
-		}
-	}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
 #endif
+
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
 		return false;
@@ -339,6 +353,29 @@ static bool filldir(struct dir_context *ctx, const char *name, int namlen,
 	prev_reclen = buf->prev_reclen;
 	if (prev_reclen && signal_pending(current))
 		return false;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (buf->is_base_dentry_android_data_root_dir) {
+		if (susfs_is_sus_android_data_d_name_found(name)) {
+			return true;
+		}
+	} else if (buf->is_base_dentry_sdcard_root_dir) {
+		if (susfs_is_sus_sdcard_d_name_found(name)) {
+			return true;
+		}
+	}
+
+	inode = ilookup(buf->sb, ino);
+	if (!inode) {
+		goto orig_flow;
+	}
+	if (susfs_is_inode_sus_path(buf->idmap, inode)) {
+		iput(inode);
+		return true;
+	}
+	iput(inode);
+orig_flow:
+#endif
 	dirent = buf->current_dir;
 	prev = (void __user *) dirent - prev_reclen;
 	if (!user_write_access_begin(prev, reclen + prev_reclen))
@@ -373,82 +410,36 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 		.current_dir = dirent
 	};
 	int error;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
+#endif
 
 	f = fdget_pos(fd);
 	if (!f.file)
 		return -EBADF;
-#ifdef CONFIG_HYMOFS
-	buf.file = f.file;
-	buf.path_buf = (char *)__get_free_page(GFP_KERNEL);
-	buf.dir_path = NULL;
-	if (buf.path_buf) {
-		char *p = d_path(&f.file->f_path, buf.path_buf, PAGE_SIZE);
-		if (!IS_ERR(p)) {
-			int len = strlen(p);
-			memmove(buf.path_buf, p, len + 1);
-			buf.dir_path = buf.path_buf;
-			buf.dir_path_len = len;
-		} else {
-			free_page((unsigned long)buf.path_buf);
-			buf.path_buf = NULL;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.sb = f.file->f_inode->i_sb;
+	inode = f.file->f_path.dentry->d_inode;
+	if (f.file->f_path.dentry && inode) {
+		if (susfs_is_base_dentry_android_data_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_android_data_root_dir = true;
+			buf.is_base_dentry_sdcard_root_dir = false;
+			goto orig_flow;
+		}
+		if (susfs_is_base_dentry_sdcard_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_sdcard_root_dir = true;
+			buf.is_base_dentry_android_data_root_dir = false;
+			goto orig_flow;
 		}
 	}
-    if (buf.dir_path && f.file->f_pos >= HYMO_MAGIC_POS) {
-        struct list_head head;
-        struct hymo_name_list *item, *tmp;
-        loff_t current_idx = 0;
-        loff_t start_idx = f.file->f_pos - HYMO_MAGIC_POS;
-        int injected = 0;
-        int error = 0;
-        
-        INIT_LIST_HEAD(&head);
-        hymofs_populate_injected_list(buf.dir_path, &head);
-        
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            if (current_idx >= start_idx) {
-                int name_len = strlen(item->name);
-                int reclen = ALIGN(offsetof(struct linux_dirent, d_name) + name_len + 2, sizeof(long));
-                if (buf.count >= reclen) {
-                    struct linux_dirent d;
-                    d.d_ino = 1;
-                    d.d_off = HYMO_MAGIC_POS + current_idx + 1;
-                    d.d_reclen = reclen;
-                    if (copy_to_user(buf.current_dir, &d, offsetof(struct linux_dirent, d_name)) ||
-                        copy_to_user(buf.current_dir->d_name, item->name, name_len) ||
-                        put_user(0, buf.current_dir->d_name + name_len) ||
-                        put_user(item->type, (char __user *)buf.current_dir + reclen - 1)) {
-                            error = -EFAULT;
-                            break;
-                    }
-                    buf.current_dir = (struct linux_dirent __user *)((char __user *)buf.current_dir + reclen);
-                    buf.count -= reclen;
-                    injected++;
-                } else {
-                    break;
-                }
-            }
-            current_idx++;
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        
-        if (error == 0) {
-            f.file->f_pos += injected;
-            error = count - buf.count;
-        }
-        
-        if (buf.path_buf) free_page((unsigned long)buf.path_buf);
-        fdput_pos(f);
-        return error;
-    }
+	buf.is_base_dentry_android_data_root_dir = false;
+	buf.is_base_dentry_sdcard_root_dir = false;
+orig_flow:
+	buf.idmap = mnt_idmap(f.file->f_path.mnt);
 #endif
-
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;
@@ -461,68 +452,19 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 		else
 			error = count - buf.count;
 	}
-#ifdef CONFIG_HYMOFS
-    if (error >= 0 && buf.count > 0 && buf.dir_path) {
-        struct list_head head;
-        struct hymo_name_list *item, *tmp;
-        loff_t current_idx = 0;
-        int injected = 0;
-        
-        INIT_LIST_HEAD(&head);
-        hymofs_populate_injected_list(buf.dir_path, &head);
-        
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            int name_len = strlen(item->name);
-            int reclen = ALIGN(offsetof(struct linux_dirent, d_name) + name_len + 2, sizeof(long));
-            if (buf.count >= reclen) {
-                struct linux_dirent d;
-                d.d_ino = 1;
-                d.d_off = HYMO_MAGIC_POS + current_idx + 1;
-                d.d_reclen = reclen;
-                if (copy_to_user(buf.current_dir, &d, offsetof(struct linux_dirent, d_name)) ||
-                    copy_to_user(buf.current_dir->d_name, item->name, name_len) ||
-                    put_user(0, buf.current_dir->d_name + name_len) ||
-                    put_user(DT_UNKNOWN, (char __user *)buf.current_dir + reclen - 1)) {
-                        break;
-                }
-                buf.current_dir = (struct linux_dirent __user *)((char __user *)buf.current_dir + reclen);
-                buf.count -= reclen;
-                injected++;
-            } else {
-                break;
-            }
-            current_idx++;
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        
-        if (injected > 0) {
-            f.file->f_pos = HYMO_MAGIC_POS + injected;
-            error = count - buf.count;
-        }
-    }
-	
-	if (buf.path_buf) free_page((unsigned long)buf.path_buf);
-#endif
 	fdput_pos(f);
 	return error;
 }
 
 struct getdents_callback64 {
 	struct dir_context ctx;
-#ifdef CONFIG_HYMOFS
-	struct file *file;
-	char *path_buf;
-	char *dir_path;
-	int dir_path_len;
-#endif
 	struct linux_dirent64 __user * current_dir;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct super_block *sb;
+	struct mnt_idmap *idmap;
+	bool is_base_dentry_android_data_root_dir;
+	bool is_base_dentry_sdcard_root_dir;
+#endif
 	int prev_reclen;
 	int count;
 	int error;
@@ -537,19 +479,10 @@ static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
 	int reclen = ALIGN(offsetof(struct linux_dirent64, d_name) + namlen + 1,
 		sizeof(u64));
 	int prev_reclen;
-
-#ifdef CONFIG_HYMOFS
-	if (buf->dir_path) {
-		int name_len = strlen(name);
-		if (buf->dir_path_len + 1 + name_len < PAGE_SIZE) {
-			char *p = buf->path_buf + buf->dir_path_len;
-			if (p > buf->path_buf && p[-1] != '/') *p++ = '/';
-			memcpy(p, name, name_len);
-			p[name_len] = '\0';
-			if (hymofs_should_hide(buf->path_buf)) return true;
-		}
-	}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
 #endif
+
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
 		return false;
@@ -559,6 +492,29 @@ static bool filldir64(struct dir_context *ctx, const char *name, int namlen,
 	prev_reclen = buf->prev_reclen;
 	if (prev_reclen && signal_pending(current))
 		return false;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (buf->is_base_dentry_android_data_root_dir) {
+		if (susfs_is_sus_android_data_d_name_found(name)) {
+			return true;
+		}
+	} else if (buf->is_base_dentry_sdcard_root_dir) {
+		if (susfs_is_sus_sdcard_d_name_found(name)) {
+			return true;
+		}
+	}
+
+	inode = ilookup(buf->sb, ino);
+	if (!inode) {
+		goto orig_flow;
+	}
+	if (susfs_is_inode_sus_path(buf->idmap, inode)) {
+		iput(inode);
+		return true;
+	}
+	iput(inode);
+orig_flow:
+#endif
 	dirent = buf->current_dir;
 	prev = (void __user *)dirent - prev_reclen;
 	if (!user_write_access_begin(prev, reclen + prev_reclen))
@@ -594,81 +550,35 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
 		.current_dir = dirent
 	};
 	int error;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
+#endif
 
 	f = fdget_pos(fd);
 	if (!f.file)
 		return -EBADF;
 
-#ifdef CONFIG_HYMOFS
-	buf.file = f.file;
-	buf.path_buf = (char *)__get_free_page(GFP_KERNEL);
-	buf.dir_path = NULL;
-	if (buf.path_buf) {
-		char *p = d_path(&f.file->f_path, buf.path_buf, PAGE_SIZE);
-		if (!IS_ERR(p)) {
-			int len = strlen(p);
-			memmove(buf.path_buf, p, len + 1);
-			buf.dir_path = buf.path_buf;
-			buf.dir_path_len = len;
-		} else {
-			free_page((unsigned long)buf.path_buf);
-			buf.path_buf = NULL;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.sb = f.file->f_inode->i_sb;
+	inode = f.file->f_path.dentry->d_inode;
+	if (f.file->f_path.dentry && inode) {
+		if (susfs_is_base_dentry_android_data_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_android_data_root_dir = true;
+			buf.is_base_dentry_sdcard_root_dir = false;
+			goto orig_flow;
+		}
+		if (susfs_is_base_dentry_sdcard_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_sdcard_root_dir = true;
+			buf.is_base_dentry_android_data_root_dir = false;
+			goto orig_flow;
 		}
 	}
-    if (buf.dir_path && f.file->f_pos >= HYMO_MAGIC_POS) {
-        struct list_head head;
-        struct hymo_name_list *item, *tmp;
-        loff_t current_idx = 0;
-        loff_t start_idx = f.file->f_pos - HYMO_MAGIC_POS;
-        int injected = 0;
-        int error = 0;
-        
-        INIT_LIST_HEAD(&head);
-        hymofs_populate_injected_list(buf.dir_path, &head);
-        
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            if (current_idx >= start_idx) {
-                int name_len = strlen(item->name);
-                int reclen = ALIGN(offsetof(struct linux_dirent64, d_name) + name_len + 1, sizeof(u64));
-                if (buf.count >= reclen) {
-                    struct linux_dirent64 d;
-                    d.d_ino = 1;
-                    d.d_off = HYMO_MAGIC_POS + current_idx + 1;
-                    d.d_reclen = reclen;
-                    d.d_type = DT_UNKNOWN;
-                    if (copy_to_user(buf.current_dir, &d, offsetof(struct linux_dirent64, d_name)) ||
-                        copy_to_user(buf.current_dir->d_name, item->name, name_len) ||
-                        put_user(0, buf.current_dir->d_name + name_len)) {
-                            error = -EFAULT;
-                            break;
-                    }
-                    buf.current_dir = (struct linux_dirent64 __user *)((char __user *)buf.current_dir + reclen);
-                    buf.count -= reclen;
-                    injected++;
-                } else {
-                    break;
-                }
-            }
-            current_idx++;
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        
-        if (error == 0) {
-            f.file->f_pos += injected;
-            error = count - buf.count;
-        }
-        
-        if (buf.path_buf) free_page((unsigned long)buf.path_buf);
-        fdput_pos(f);
-        return error;
-    }
+	buf.is_base_dentry_android_data_root_dir = false;
+	buf.is_base_dentry_sdcard_root_dir = false;
+orig_flow:
+	buf.idmap = mnt_idmap(f.file->f_path.mnt);
 #endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
@@ -683,55 +593,6 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
 		else
 			error = count - buf.count;
 	}
-#ifdef CONFIG_HYMOFS
-    if (error >= 0 && buf.count > 0 && buf.dir_path) {
-        struct list_head head;
-        struct hymo_name_list *item, *tmp;
-        loff_t current_idx = 0;
-        int injected = 0;
-        
-        INIT_LIST_HEAD(&head);
-        hymofs_populate_injected_list(buf.dir_path, &head);
-        
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            int name_len = strlen(item->name);
-            int reclen = ALIGN(offsetof(struct linux_dirent64, d_name) + name_len + 1, sizeof(u64));
-            if (buf.count >= reclen) {
-                struct linux_dirent64 d;
-                d.d_ino = 1;
-                d.d_off = HYMO_MAGIC_POS + current_idx + 1;
-                d.d_reclen = reclen;
-                d.d_type = item->type;
-                if (copy_to_user(buf.current_dir, &d, offsetof(struct linux_dirent64, d_name)) ||
-                    copy_to_user(buf.current_dir->d_name, item->name, name_len) ||
-                    put_user(0, buf.current_dir->d_name + name_len)) {
-                        break;
-                }
-                buf.current_dir = (struct linux_dirent64 __user *)((char __user *)buf.current_dir + reclen);
-                buf.count -= reclen;
-                injected++;
-            } else {
-                break;
-            }
-            current_idx++;
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        list_for_each_entry_safe(item, tmp, &head, list) {
-            list_del(&item->list);
-            kfree(item->name);
-            kfree(item);
-        }
-        
-        if (injected > 0) {
-            f.file->f_pos = HYMO_MAGIC_POS + injected;
-            error = count - buf.count;
-        }
-    }
-	
-	if (buf.path_buf) free_page((unsigned long)buf.path_buf);
-#endif
 	fdput_pos(f);
 	return error;
 }
@@ -746,13 +607,13 @@ struct compat_old_linux_dirent {
 
 struct compat_readdir_callback {
 	struct dir_context ctx;
-#ifdef CONFIG_HYMOFS
-	struct file *file;
-	char *path_buf;
-	char *dir_path;
-	int dir_path_len;
-#endif
 	struct compat_old_linux_dirent __user *dirent;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct super_block *sb;
+	struct mnt_idmap *idmap;
+	bool is_base_dentry_android_data_root_dir;
+	bool is_base_dentry_sdcard_root_dir;
+#endif
 	int result;
 };
 
@@ -764,6 +625,9 @@ static bool compat_fillonedir(struct dir_context *ctx, const char *name,
 		container_of(ctx, struct compat_readdir_callback, ctx);
 	struct compat_old_linux_dirent __user *dirent;
 	compat_ulong_t d_ino;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
+#endif
 
 	if (buf->result)
 		return false;
@@ -775,6 +639,28 @@ static bool compat_fillonedir(struct dir_context *ctx, const char *name,
 		buf->result = -EOVERFLOW;
 		return false;
 	}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (buf->is_base_dentry_android_data_root_dir) {
+		if (susfs_is_sus_android_data_d_name_found(name)) {
+			return true;
+		}
+	} else if (buf->is_base_dentry_sdcard_root_dir) {
+		if (susfs_is_sus_sdcard_d_name_found(name)) {
+			return true;
+		}
+	}
+
+	inode = ilookup(buf->sb, ino);
+	if (!inode) {
+		goto orig_flow;
+	}
+	if (susfs_is_inode_sus_path(buf->idmap, inode)) {
+		iput(inode);
+		return true;
+	}
+	iput(inode);
+orig_flow:
+#endif
 	buf->result++;
 	dirent = buf->dirent;
 	if (!user_write_access_begin(dirent,
@@ -803,34 +689,39 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 		.ctx.actor = compat_fillonedir,
 		.dirent = dirent
 	};
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
+#endif
 
 	if (!f.file)
 		return -EBADF;
 
-#ifdef CONFIG_HYMOFS
-	buf.file = f.file;
-	buf.path_buf = (char *)__get_free_page(GFP_KERNEL);
-	buf.dir_path = NULL;
-	if (buf.path_buf) {
-		char *p = d_path(&f.file->f_path, buf.path_buf, PAGE_SIZE);
-		if (!IS_ERR(p)) {
-			int len = strlen(p);
-			memmove(buf.path_buf, p, len + 1);
-			buf.dir_path = buf.path_buf;
-			buf.dir_path_len = len;
-		} else {
-			free_page((unsigned long)buf.path_buf);
-			buf.path_buf = NULL;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.sb = f.file->f_inode->i_sb;
+	inode = f.file->f_path.dentry->d_inode;
+	if (f.file->f_path.dentry && inode) {
+		if (susfs_is_base_dentry_android_data_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_android_data_root_dir = true;
+			buf.is_base_dentry_sdcard_root_dir = false;
+			goto orig_flow;
+		}
+		if (susfs_is_base_dentry_sdcard_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_sdcard_root_dir = true;
+			buf.is_base_dentry_android_data_root_dir = false;
+			goto orig_flow;
 		}
 	}
+	buf.is_base_dentry_android_data_root_dir = false;
+	buf.is_base_dentry_sdcard_root_dir = false;
+orig_flow:
+	buf.idmap = mnt_idmap(f.file->f_path.mnt);
 #endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (buf.result)
 		error = buf.result;
 
-#ifdef CONFIG_HYMOFS
-	if (buf.path_buf) free_page((unsigned long)buf.path_buf);
-#endif
 	fdput_pos(f);
 	return error;
 }
@@ -844,13 +735,13 @@ struct compat_linux_dirent {
 
 struct compat_getdents_callback {
 	struct dir_context ctx;
-#ifdef CONFIG_HYMOFS
-	struct file *file;
-	char *path_buf;
-	char *dir_path;
-	int dir_path_len;
-#endif
 	struct compat_linux_dirent __user *current_dir;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct super_block *sb;
+	struct mnt_idmap *idmap;
+	bool is_base_dentry_android_data_root_dir;
+	bool is_base_dentry_sdcard_root_dir;
+#endif
 	int prev_reclen;
 	int count;
 	int error;
@@ -866,19 +757,10 @@ static bool compat_filldir(struct dir_context *ctx, const char *name, int namlen
 	int reclen = ALIGN(offsetof(struct compat_linux_dirent, d_name) +
 		namlen + 2, sizeof(compat_long_t));
 	int prev_reclen;
-
-#ifdef CONFIG_HYMOFS
-	if (buf->dir_path) {
-		int name_len = strlen(name);
-		if (buf->dir_path_len + 1 + name_len < PAGE_SIZE) {
-			char *p = buf->path_buf + buf->dir_path_len;
-			if (p > buf->path_buf && p[-1] != '/') *p++ = '/';
-			memcpy(p, name, name_len);
-			p[name_len] = '\0';
-			if (hymofs_should_hide(buf->path_buf)) return true;
-		}
-	}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
 #endif
+
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
 		return false;
@@ -893,6 +775,28 @@ static bool compat_filldir(struct dir_context *ctx, const char *name, int namlen
 	prev_reclen = buf->prev_reclen;
 	if (prev_reclen && signal_pending(current))
 		return false;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (buf->is_base_dentry_android_data_root_dir) {
+		if (susfs_is_sus_android_data_d_name_found(name)) {
+			return true;
+		}
+	} else if (buf->is_base_dentry_sdcard_root_dir) {
+		if (susfs_is_sus_sdcard_d_name_found(name)) {
+			return true;
+		}
+	}
+
+	inode = ilookup(buf->sb, ino);
+	if (!inode) {
+		goto orig_flow;
+	}
+	if (susfs_is_inode_sus_path(buf->idmap, inode)) {
+		iput(inode);
+		return true;
+	}
+	iput(inode);
+orig_flow:
+#endif
 	dirent = buf->current_dir;
 	prev = (void __user *) dirent - prev_reclen;
 	if (!user_write_access_begin(prev, reclen + prev_reclen))
@@ -926,27 +830,35 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
 		.count = count
 	};
 	int error;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct inode *inode;
+#endif
 
 	f = fdget_pos(fd);
 	if (!f.file)
 		return -EBADF;
 
-#ifdef CONFIG_HYMOFS
-	buf.file = f.file;
-	buf.path_buf = (char *)__get_free_page(GFP_KERNEL);
-	buf.dir_path = NULL;
-	if (buf.path_buf) {
-		char *p = d_path(&f.file->f_path, buf.path_buf, PAGE_SIZE);
-		if (!IS_ERR(p)) {
-			int len = strlen(p);
-			memmove(buf.path_buf, p, len + 1);
-			buf.dir_path = buf.path_buf;
-			buf.dir_path_len = len;
-		} else {
-			free_page((unsigned long)buf.path_buf);
-			buf.path_buf = NULL;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.sb = f.file->f_inode->i_sb;
+	inode = f.file->f_path.dentry->d_inode;
+	if (f.file->f_path.dentry && inode) {
+		if (susfs_is_base_dentry_android_data_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_android_data_root_dir = true;
+			buf.is_base_dentry_sdcard_root_dir = false;
+			goto orig_flow;
+		}
+		if (susfs_is_base_dentry_sdcard_dir(f.file->f_path.dentry))
+		{
+			buf.is_base_dentry_sdcard_root_dir = true;
+			buf.is_base_dentry_android_data_root_dir = false;
+			goto orig_flow;
 		}
 	}
+	buf.is_base_dentry_android_data_root_dir = false;
+	buf.is_base_dentry_sdcard_root_dir = false;
+orig_flow:
+	buf.idmap = mnt_idmap(f.file->f_path.mnt);
 #endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
@@ -960,9 +872,6 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
 		else
 			error = count - buf.count;
 	}
-#ifdef CONFIG_HYMOFS
-	if (buf.path_buf) free_page((unsigned long)buf.path_buf);
-#endif
 	fdput_pos(f);
 	return error;
 }
