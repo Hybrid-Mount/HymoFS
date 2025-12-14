@@ -35,6 +35,7 @@ struct filename;
 struct filename *hymofs_handle_getname(struct filename *result);
 
 char *__hymofs_resolve_target(const char *pathname);
+char *__hymofs_reverse_lookup(const char *pathname);
 bool __hymofs_should_hide(const char *pathname);
 bool __hymofs_should_spoof_mtime(const char *pathname);
 int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, struct list_head *head);
@@ -64,6 +65,12 @@ static inline char *hymofs_resolve_target(const char *pathname)
     return __hymofs_resolve_target(pathname);
 }
 
+static inline char *hymofs_reverse_lookup(const char *pathname)
+{
+    if (atomic_read(&hymo_version) == 0) return NULL;
+    return __hymofs_reverse_lookup(pathname);
+}
+
 static inline bool hymofs_should_hide(const char *pathname)
 {
     if (atomic_read(&hymo_version) == 0) return false;
@@ -88,6 +95,7 @@ static inline void hymofs_spoof_stat(const struct path *path, struct kstat *stat
 
 static inline struct filename *hymofs_handle_getname(struct filename *result) { return result; }
 static inline char *hymofs_resolve_target(const char *pathname) { return NULL; }
+static inline char *hymofs_reverse_lookup(const char *pathname) { return NULL; }
 static inline bool hymofs_should_hide(const char *pathname) { return false; }
 static inline bool hymofs_should_spoof_mtime(const char *pathname) { return false; }
 static inline int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, struct list_head *head) { return 0; }

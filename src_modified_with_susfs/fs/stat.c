@@ -30,7 +30,6 @@
 #include "internal.h"
 #include "mount.h"
 
-
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 extern void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat);
 #endif
@@ -157,10 +156,20 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 				  STATX_ATTR_DAX);
 
 	idmap = mnt_idmap(path->mnt);
+#ifdef CONFIG_HYMOFS
+	if (inode->i_op->getattr) {
+		int ret = inode->i_op->getattr(idmap, path, stat,
+					    request_mask,
+					    query_flags | AT_GETATTR_NOSEC);
+        if (ret == 0) hymofs_spoof_stat(path, stat);
+        return ret;
+    }
+#else
 	if (inode->i_op->getattr)
 		return inode->i_op->getattr(idmap, path, stat,
 					    request_mask,
 					    query_flags | AT_GETATTR_NOSEC);
+#endif
 
 	generic_fillattr(idmap, request_mask, inode, stat);
 #ifdef CONFIG_HYMOFS

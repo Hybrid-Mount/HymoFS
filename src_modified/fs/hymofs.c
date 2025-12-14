@@ -187,6 +187,23 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
                 char *res = d_path(&path, tmp_buf, PATH_MAX);
                 if (!IS_ERR(res)) {
                     resolved_src = kstrdup(res, GFP_KERNEL);
+                    
+                    /* Always extract parent directory for injection, even if file exists */
+                    {
+                        char *last_slash = strrchr(res, '/');
+                        if (last_slash) {
+                            if (last_slash == res) {
+                                parent_dir = kstrdup("/", GFP_KERNEL);
+                            } else {
+                                size_t len = last_slash - res;
+                                parent_dir = kmalloc(len + 1, GFP_KERNEL);
+                                if (parent_dir) {
+                                    memcpy(parent_dir, res, len);
+                                    parent_dir[len] = '\0';
+                                }
+                            }
+                        }
+                    }
                 }
                 path_put(&path);
             } else {
@@ -506,6 +523,29 @@ char *__hymofs_resolve_target(const char *pathname)
 }
 EXPORT_SYMBOL(__hymofs_resolve_target);
 
+/* Returns kstrdup'd source if target found, NULL otherwise. Caller must kfree. */
+char *__hymofs_reverse_lookup(const char *pathname)
+{
+    unsigned long flags;
+    struct hymo_entry *entry;
+    int bkt;
+    char *src = NULL;
+
+    if (atomic_read(&hymo_version) == 0) return NULL;
+    if (!pathname) return NULL;
+
+    spin_lock_irqsave(&hymo_lock, flags);
+    hash_for_each(hymo_paths, bkt, entry, node) {
+        if (strcmp(entry->target, pathname) == 0) {
+            src = kstrdup(entry->src, GFP_ATOMIC);
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&hymo_lock, flags);
+    return src;
+}
+EXPORT_SYMBOL(__hymofs_reverse_lookup);
+
 bool __hymofs_should_hide(const char *pathname)
 {
     unsigned long flags;
@@ -693,17 +733,22 @@ EXPORT_SYMBOL(__hymofs_cleanup_readdir);
 
 bool __hymofs_check_filldir(struct hymo_readdir_context *ctx, const char *name, int namlen)
 {
+    bool ret = false;
     if (ctx->dir_path) {
         if (ctx->dir_path_len + 1 + namlen < PAGE_SIZE) {
             char *p = ctx->path_buf + ctx->dir_path_len;
             if (p > ctx->path_buf && p[-1] != '/') *p++ = '/';
             memcpy(p, name, namlen);
             p[namlen] = '\0';
-            if (hymofs_should_hide(ctx->path_buf)) return true;
-            if (__hymofs_should_replace(ctx->path_buf)) return true;
+            
+            if (hymofs_should_hide(ctx->path_buf)) ret = true;
+            else if (__hymofs_should_replace(ctx->path_buf)) ret = true;
+
+            /* Restore path buffer to directory path for next iteration */
+            ctx->path_buf[ctx->dir_path_len] = '\0';
         }
     }
-    return false;
+    return ret;
 }
 EXPORT_SYMBOL(__hymofs_check_filldir);
 
@@ -879,6 +924,11 @@ void hymofs_spoof_stat(const struct path *path, struct kstat *stat)
                 hymo_log("spoofing stat for %s\n", p);
                 ktime_get_real_ts64(&stat->mtime);
                 stat->ctime = stat->mtime;
+            }
+            /* HymoFS: Inode obfuscation for redirected paths */
+            if (__hymofs_should_replace(p)) {
+                /* XOR with a magic number to make inode look different from target */
+                stat->ino ^= 0x48594D4F;
             }
         }
         free_page((unsigned long)buf);
