@@ -58,9 +58,15 @@ struct hymo_inject_entry {
     struct hlist_node node;
 };
 
+struct hymo_xattr_sb_entry {
+    struct super_block *sb;
+    struct hlist_node node;
+};
+
 static DEFINE_HASHTABLE(hymo_paths, HYMO_HASH_BITS);
 static DEFINE_HASHTABLE(hymo_hide_paths, HYMO_HASH_BITS);
 static DEFINE_HASHTABLE(hymo_inject_dirs, HYMO_HASH_BITS);
+static DEFINE_HASHTABLE(hymo_xattr_sbs, HYMO_HASH_BITS);
 static DEFINE_SPINLOCK(hymo_lock);
 atomic_t hymo_version = ATOMIC_INIT(0);
 EXPORT_SYMBOL(hymo_version);
@@ -77,6 +83,7 @@ static void hymo_cleanup(void) {
     struct hymo_entry *entry;
     struct hymo_hide_entry *hide_entry;
     struct hymo_inject_entry *inject_entry;
+    struct hymo_xattr_sb_entry *sb_entry;
     struct hlist_node *tmp;
     int bkt;
     hash_for_each_safe(hymo_paths, bkt, tmp, entry, node) {
@@ -94,6 +101,10 @@ static void hymo_cleanup(void) {
         hash_del(&inject_entry->node);
         kfree(inject_entry->dir);
         kfree(inject_entry);
+    }
+    hash_for_each_safe(hymo_xattr_sbs, bkt, tmp, sb_entry, node) {
+        hash_del(&sb_entry->node);
+        kfree(sb_entry);
     }
 }
 
@@ -157,14 +168,18 @@ static void hymofs_reorder_mnt_id(void)
             // Hide it by assigning a high ID (susfs compatible)
             // 500000 is DEFAULT_KSU_MNT_ID
             if (m->mnt_id < 500000) {
+#ifdef CONFIG_KSU_SUSFS
                 WRITE_ONCE(m->mnt.susfs_mnt_id_backup, m->mnt_id);
+#endif
                 WRITE_ONCE(m->mnt_id, 500000 + (id % 1000)); // Use a range
             }
         } else {
             // Skip if already hidden (by susfs or us)
             if (m->mnt_id >= 500000) continue;
             
+#ifdef CONFIG_KSU_SUSFS
             WRITE_ONCE(m->mnt.susfs_mnt_id_backup, m->mnt_id);
+#endif
             WRITE_ONCE(m->mnt_id, id++);
         }
     }
@@ -449,6 +464,40 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             break;
         }
 
+        case HYMO_IOC_HIDE_OVERLAY_XATTRS: {
+            struct path path;
+            struct hymo_xattr_sb_entry *sb_entry;
+            bool found = false;
+            
+            if (!src) { ret = -EINVAL; break; }
+            
+            if (kern_path(src, LOOKUP_FOLLOW, &path) == 0) {
+                struct super_block *sb = path.dentry->d_sb;
+                
+                spin_lock_irqsave(&hymo_lock, flags);
+                hash_for_each_possible(hymo_xattr_sbs, sb_entry, node, (unsigned long)sb) {
+                    if (sb_entry->sb == sb) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    sb_entry = kmalloc(sizeof(*sb_entry), GFP_ATOMIC);
+                    if (sb_entry) {
+                        sb_entry->sb = sb;
+                        hash_add(hymo_xattr_sbs, &sb_entry->node, (unsigned long)sb);
+                        hymo_log("hide xattrs for sb %p (path: %s)\n", sb, src);
+                    }
+                }
+                atomic_inc(&hymo_version);
+                spin_unlock_irqrestore(&hymo_lock, flags);
+                path_put(&path);
+            } else {
+                ret = -ENOENT;
+            }
+            break;
+        }
+
         case HYMO_IOC_DEL_RULE:
             if (!src) { ret = -EINVAL; break; }
             hymo_log("del rule: src=%s\n", src);
@@ -480,6 +529,8 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
                     goto out_delete;
                 }
             }
+            // Note: We don't support deleting xattr SB rules by path easily here
+            // because we store SBs, not paths. Use CLEAR_ALL to reset.
     out_delete:
             atomic_inc(&hymo_version);
             spin_unlock_irqrestore(&hymo_lock, flags);
@@ -491,6 +542,7 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             size_t buf_size;
             size_t written = 0;
             int bkt;
+            struct hymo_xattr_sb_entry *sb_entry;
 
             if (copy_from_user(&list_arg, (void __user *)arg, sizeof(list_arg))) {
                 ret = -EFAULT;
@@ -524,6 +576,10 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
                 if (written >= buf_size) break;
                 written += scnprintf(kbuf + written, buf_size - written, "inject %s\n", inject_entry->dir);
             }
+            hash_for_each(hymo_xattr_sbs, bkt, sb_entry, node) {
+                if (written >= buf_size) break;
+                written += scnprintf(kbuf + written, buf_size - written, "hide_xattr_sb %p\n", sb_entry->sb);
+            }
             spin_unlock_irqrestore(&hymo_lock, flags);
 
             if (copy_to_user(list_arg.buf, kbuf, written)) {
@@ -539,6 +595,11 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             kfree(kbuf);
             break;
         }
+
+        case HYMO_IOC_REORDER_MNT_ID:
+            hymo_log("reordering mount IDs\n");
+            hymofs_reorder_mnt_id();
+            break;
 
         default:
             ret = -EINVAL;
@@ -558,6 +619,7 @@ static ssize_t hymo_read(struct file *file, char __user *buf, size_t count, loff
     struct hymo_entry *entry;
     struct hymo_hide_entry *hide_entry;
     struct hymo_inject_entry *inject_entry;
+    struct hymo_xattr_sb_entry *sb_entry;
     unsigned long flags;
     ssize_t ret;
 
@@ -581,6 +643,10 @@ static ssize_t hymo_read(struct file *file, char __user *buf, size_t count, loff
     hash_for_each(hymo_inject_dirs, bkt, inject_entry, node) {
         if (written >= size) break;
         written += scnprintf(kbuf + written, size - written, "inject %s\n", inject_entry->dir);
+    }
+    hash_for_each(hymo_xattr_sbs, bkt, sb_entry, node) {
+        if (written >= size) break;
+        written += scnprintf(kbuf + written, size - written, "hide_xattr_sb %p\n", sb_entry->sb);
     }
     spin_unlock_irqrestore(&hymo_lock, flags);
 
@@ -607,6 +673,7 @@ static int __init hymofs_init(void)
     hash_init(hymo_paths);
     hash_init(hymo_hide_paths);
     hash_init(hymo_inject_dirs);
+    hash_init(hymo_xattr_sbs);
     
     misc_register(&hymo_misc_dev);
     
@@ -1033,13 +1100,44 @@ int hymofs_inject_entries64(struct hymo_readdir_context *ctx, void __user **dir_
 }
 EXPORT_SYMBOL(hymofs_inject_entries64);
 
+static dev_t get_dev_for_path(const char *path_str) {
+    struct path path;
+    dev_t dev = 0;
+    if (kern_path(path_str, LOOKUP_FOLLOW, &path) == 0) {
+        if (path.dentry && path.dentry->d_sb) {
+            dev = path.dentry->d_sb->s_dev;
+        }
+        path_put(&path);
+    }
+    return dev;
+}
+
 /* Update timestamps for injected directories to appear current */
 void hymofs_spoof_stat(const struct path *path, struct kstat *stat)
 {
+    if (!hymo_stealth_enabled) return;
+
     char *buf = (char *)__get_free_page(GFP_KERNEL);
     if (buf && path && path->dentry) {
         char *p = d_path(path, buf, PAGE_SIZE);
         if (!IS_ERR(p)) {
+            /* HymoFS: Spoof device ID for system partitions */
+            const char* prefixes[] = {
+                "/system", "/vendor", "/product", "/system_ext", "/odm", "/oem", NULL
+            };
+            int i;
+            for (i = 0; prefixes[i]; i++) {
+                size_t len = strlen(prefixes[i]);
+                if (strncmp(p, prefixes[i], len) == 0 && (p[len] == '\0' || p[len] == '/')) {
+                    dev_t target_dev = get_dev_for_path(prefixes[i]);
+                    if (target_dev != 0 && stat->dev != target_dev) {
+                        hymo_log("spoofing dev for %s: %u -> %u\n", p, stat->dev, target_dev);
+                        stat->dev = target_dev;
+                    }
+                    break;
+                }
+            }
+
             if (hymofs_should_spoof_mtime(p)) {
                 hymo_log("spoofing stat for %s\n", p);
                 ktime_get_real_ts64(&stat->mtime);
@@ -1049,11 +1147,78 @@ void hymofs_spoof_stat(const struct path *path, struct kstat *stat)
             if (__hymofs_should_replace(p)) {
                 /* XOR with a magic number to make inode look different from target */
                 stat->ino ^= 0x48594D4F;
+                
+                /* Fixup permissions for /system paths to ensure they look like root-owned */
+                if (strncmp(p, "/system/", 8) == 0) {
+                    stat->uid = KUIDT_INIT(0);
+                    stat->gid = KGIDT_INIT(0);
+                }
             }
         }
         free_page((unsigned long)buf);
     }
 }
 EXPORT_SYMBOL(hymofs_spoof_stat);
+
+bool hymofs_is_overlay_xattr(struct dentry *dentry, const char *name)
+{
+    struct hymo_xattr_sb_entry *sb_entry;
+    bool found = false;
+    unsigned long flags;
+
+    if (!name) return false;
+    if (strncmp(name, "trusted.overlay.", 16) != 0) return false;
+    
+    if (!dentry) return false;
+
+    spin_lock_irqsave(&hymo_lock, flags);
+    hash_for_each_possible(hymo_xattr_sbs, sb_entry, node, (unsigned long)dentry->d_sb) {
+        if (sb_entry->sb == dentry->d_sb) {
+            found = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&hymo_lock, flags);
+    
+    return found;
+}
+EXPORT_SYMBOL(hymofs_is_overlay_xattr);
+
+ssize_t hymofs_filter_xattrs(struct dentry *dentry, char *klist, ssize_t len)
+{
+    struct hymo_xattr_sb_entry *sb_entry;
+    bool should_filter = false;
+    unsigned long flags;
+    char *p = klist;
+    char *end = klist + len;
+    char *out = klist;
+    ssize_t new_len = 0;
+    
+    if (!dentry) return len;
+
+    spin_lock_irqsave(&hymo_lock, flags);
+    hash_for_each_possible(hymo_xattr_sbs, sb_entry, node, (unsigned long)dentry->d_sb) {
+        if (sb_entry->sb == dentry->d_sb) {
+            should_filter = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&hymo_lock, flags);
+
+    if (!should_filter) return len;
+
+    while (p < end) {
+        size_t slen = strlen(p);
+        if (strncmp(p, "trusted.overlay.", 16) != 0) {
+            if (out != p)
+                memmove(out, p, slen + 1);
+            out += slen + 1;
+            new_len += slen + 1;
+        }
+        p += slen + 1;
+    }
+    return new_len;
+}
+EXPORT_SYMBOL(hymofs_filter_xattrs);
 
 #endif /* CONFIG_HYMOFS */

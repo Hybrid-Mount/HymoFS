@@ -19,6 +19,7 @@ struct hymo_readdir_context {
     char *path_buf;
     char *dir_path;
     int dir_path_len;
+    bool entry_written;
 };
 
 extern atomic_t hymo_version;
@@ -29,6 +30,8 @@ bool __hymofs_check_filldir(struct hymo_readdir_context *ctx, const char *name, 
 int hymofs_inject_entries(struct hymo_readdir_context *ctx, void __user **dir_ptr, int *count, loff_t *pos);
 int hymofs_inject_entries64(struct hymo_readdir_context *ctx, void __user **dir_ptr, int *count, loff_t *pos);
 void hymofs_spoof_stat(const struct path *path, struct kstat *stat);
+ssize_t hymofs_filter_xattrs(struct dentry *dentry, char *klist, ssize_t len);
+bool hymofs_is_overlay_xattr(struct dentry *dentry, const char *name);
 
 struct hymo_name_list {
     char *name;
@@ -97,6 +100,8 @@ static inline bool hymofs_check_filldir(struct hymo_readdir_context *ctx, const 
 static inline int hymofs_inject_entries(struct hymo_readdir_context *ctx, void __user **dir_ptr, int *count, loff_t *pos) { return 0; }
 static inline int hymofs_inject_entries64(struct hymo_readdir_context *ctx, void __user **dir_ptr, int *count, loff_t *pos) { return 0; }
 static inline void hymofs_spoof_stat(const struct path *path, struct kstat *stat) {}
+static inline ssize_t hymofs_filter_xattrs(struct dentry *dentry, char *klist, ssize_t len) { return len; }
+static inline bool hymofs_is_overlay_xattr(struct dentry *dentry, const char *name) { return false; }
 
 static inline struct filename *hymofs_handle_getname(struct filename *result) { return result; }
 static inline char *hymofs_resolve_target(const char *pathname) { return NULL; }
