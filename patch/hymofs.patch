@@ -25,10 +25,10 @@ index 9bb1d3de723e..6f664a5cbf1a 100644
  
  		spin_lock_irqsave(&dev->event_lock, flags);
 diff --git a/fs/Kconfig b/fs/Kconfig
-index 2fb08d05d158..72c41ad3275f 100644
+index 2fb08d05d158..5860033d6b4f 100644
 --- a/fs/Kconfig
 +++ b/fs/Kconfig
-@@ -406,3 +406,37 @@ config IO_WQ
+@@ -406,3 +406,30 @@ config IO_WQ
  	bool
  
  endmenu
@@ -57,13 +57,6 @@ index 2fb08d05d158..72c41ad3275f 100644
 +	help
 +	  Enable debug logging for HymoFS operations.
 +	  This will print verbose debug information to kernel log.
-+
-+config KSU_HYMOFS_LSMBPS
-+	bool "HymoFS LSM Bypass"
-+	depends on KSU_HYMOFS
-+	default n
-+	help
-+	  Enable LSM bypass support for HymoFS.
 +
 +endmenu
 diff --git a/fs/Makefile b/fs/Makefile
@@ -246,10 +239,10 @@ index cf487b0e49dd..69bb08bc80b9 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000000..6be028197676
+index 000000000000..e6f2cbafe9d5
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2352 @@
+@@ -0,0 +1,2259 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -306,9 +299,6 @@ index 000000000000..6be028197676
 +
 +/* PER_USER_RANGE for multi-user support */
 +#define PER_USER_RANGE 100000
-+
-+/* AVC log spoofing flag - defined in security/selinux/avc.c */
-+extern bool hymo_is_avc_log_spoofing_enabled;
 +
 +#ifdef CONFIG_KSU_HYMOFS
 +
@@ -665,9 +655,15 @@ index 000000000000..6be028197676
 +
 +    if (cmd == HYMO_CMD_SET_DEBUG) {
 +        int val;
-+        if (copy_from_user(&val, arg, sizeof(val))) return -EFAULT;
++        printk(KERN_INFO "hymofs: SET_DEBUG entry, arg=%px\n", arg);
++        if (copy_from_user(&val, arg, sizeof(val))) {
++            printk(KERN_ERR "hymofs: SET_DEBUG copy_from_user failed\n");
++            return -EFAULT;
++        }
++        printk(KERN_INFO "hymofs: SET_DEBUG val=%d (raw)\n", val);
 +        hymo_debug_enabled = !!val;
-+        hymo_log("debug mode %s\n", hymo_debug_enabled ? "enabled" : "disabled");
++        // Always print this message so user can confirm debug state changed
++        printk(KERN_INFO "hymofs: debug mode %s\n", hymo_debug_enabled ? "enabled" : "disabled");
 +        return 0;
 +    }
 +
@@ -681,7 +677,7 @@ index 000000000000..6be028197676
 +        int val;
 +        if (copy_from_user(&val, arg, sizeof(val))) return -EFAULT;
 +        hymo_stealth_enabled = !!val;
-+        hymo_log("stealth mode %s\n", hymo_stealth_enabled ? "enabled" : "disabled");
++        printk(KERN_INFO "hymofs: stealth mode %s\n", hymo_stealth_enabled ? "enabled" : "disabled");
 +        if (hymo_stealth_enabled) {
 +            hymofs_spoof_mounts();
 +            hymofs_reorder_mnt_id();
@@ -1174,16 +1170,6 @@ index 000000000000..6be028197676
 +        case HYMO_CMD_REORDER_MNT_ID:
 +            hymo_log("reordering mount IDs\n");
 +            hymofs_reorder_mnt_id();
-+            break;
-+
-+        case HYMO_CMD_SET_AVC_LOG_SPOOFING:
-+            if (req.type) {
-+                hymo_is_avc_log_spoofing_enabled = true;
-+                hymo_log("AVC log spoofing enabled\n");
-+            } else {
-+                hymo_is_avc_log_spoofing_enabled = false;
-+                hymo_log("AVC log spoofing disabled\n");
-+            }
 +            break;
 +
 +        default:
@@ -2515,92 +2501,6 @@ index 000000000000..6be028197676
 +    return new_len;
 +}
 +
-+#ifdef CONFIG_KSU_HYMOFS_LSMBPS
-+int hymofs_check_bypass(struct file *file)
-+{
-+    char *buf, *path;
-+    char *resolve_buf;
-+    int ret = 0;
-+    int res_len;
-+
-+    /* Early boot protection */
-+    if (system_state < SYSTEM_RUNNING) return 0;
-+    if (!file) return 0;
-+    if (atomic_read(&hymo_atomiconfig) == 0) return 0;
-+
-+    buf = (char *)__get_free_page(GFP_ATOMIC);
-+    if (!buf) return 0;
-+
-+    resolve_buf = (char *)__get_free_page(GFP_ATOMIC);
-+    if (!resolve_buf) {
-+        free_page((unsigned long)buf);
-+        return 0;
-+    }
-+
-+    path = d_path(&file->f_path, buf, PAGE_SIZE);
-+    if (!IS_ERR(path)) {
-+        res_len = __hymofs_reverse_lookup(path, resolve_buf, PAGE_SIZE);
-+        if (res_len > 0) {
-+            hymo_log("SELinux Bypass: Allowing access to %s\n", path);
-+            ret = 1;
-+        }
-+    }
-+
-+    free_page((unsigned long)resolve_buf);
-+    free_page((unsigned long)buf);
-+    return ret;
-+}
-+
-+int hymofs_check_inode_bypass(struct inode *inode)
-+{
-+    struct hymo_xattr_sb_entry *sb_entry;
-+    int ret = 0;
-+
-+    /* Early boot protection */
-+    if (system_state < SYSTEM_RUNNING) return 0;
-+    if (!inode || !inode->i_sb) return 0;
-+    if (atomic_read(&hymo_atomiconfig) == 0) return 0;
-+
-+    rcu_read_lock();
-+    hlist_for_each_entry_rcu(sb_entry, &hymo_xattr_sbs[hash_min((unsigned long)inode->i_sb, HYMO_HASH_BITS)], node) {
-+        if (sb_entry->sb == inode->i_sb) {
-+            hymo_log("SELinux Inode Bypass: Allowing access to inode %lu on sb %p\n", inode->i_ino, inode->i_sb);
-+            ret = 1;
-+            break;
-+        }
-+    }
-+    rcu_read_unlock();
-+    
-+    return ret;
-+}
-+
-+int hymofs_check_setxattr_bypass(struct dentry *dentry, const char *name)
-+{
-+    struct hymo_xattr_sb_entry *sb_entry;
-+    int ret = 0;
-+
-+    /* Early boot protection */
-+    if (system_state < SYSTEM_RUNNING) return 0;
-+    if (!dentry || !dentry->d_sb) return 0;
-+    if (atomic_read(&hymo_atomiconfig) == 0) return 0;
-+
-+    // Only bypass for security.selinux
-+    if (strcmp(name, XATTR_NAME_SELINUX) != 0) return 0;
-+
-+    rcu_read_lock();
-+    hlist_for_each_entry_rcu(sb_entry, &hymo_xattr_sbs[hash_min((unsigned long)dentry->d_sb, HYMO_HASH_BITS)], node) {
-+        if (sb_entry->sb == dentry->d_sb) {
-+            hymo_log("SELinux Setxattr Bypass: Allowing setxattr on sb %p\n", dentry->d_sb);
-+            ret = 1;
-+            break;
-+        }
-+    }
-+    rcu_read_unlock();
-+    
-+    return ret;
-+}
-+#endif /* CONFIG_KSU_HYMOFS_LSMBPS */
-+
 +#endif /* CONFIG_KSU_HYMOFS */
 diff --git a/fs/namei.c b/fs/namei.c
 index 5f45d9b2f84d..c9eaded78a3b 100644
@@ -3181,10 +3081,10 @@ index a6eb8cbc7b4c..743f9f969170 100644
  
 diff --git a/include/linux/hymo_magic.h b/include/linux/hymo_magic.h
 new file mode 100644
-index 000000000000..a7c3cbdd3bed
+index 000000000000..774a3bcec6b2
 --- /dev/null
 +++ b/include/linux/hymo_magic.h
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,143 @@
 +#ifndef _LINUX_HYMO_MAGIC_H
 +#define _LINUX_HYMO_MAGIC_H
 +
@@ -3234,7 +3134,6 @@ index 000000000000..a7c3cbdd3bed
 +#define HYMO_CMD_SET_STEALTH 0x48010
 +#define HYMO_CMD_HIDE_OVERLAY_XATTRS 0x48011
 +#define HYMO_CMD_ADD_MERGE_RULE 0x48012
-+#define HYMO_CMD_SET_AVC_LOG_SPOOFING 0x48013
 +#define HYMO_CMD_SET_MIRROR_PATH 0x48014
 +// New commands for enhanced spoofing
 +#define HYMO_CMD_ADD_SPOOF_KSTAT 0x48015
@@ -3712,104 +3611,3 @@ index 74bed736f6a8..0d7eca1e8902 100644
  	if (copy_to_user(name, &tmp, sizeof(tmp)))
  		return -EFAULT;
  
-diff --git a/security/selinux/avc.c b/security/selinux/avc.c
-index 9f44a0f446ec..20a52f84f269 100644
---- a/security/selinux/avc.c
-+++ b/security/selinux/avc.c
-@@ -47,6 +47,11 @@
- #undef CREATE_TRACE_POINTS
- #include <trace/hooks/avc.h>
- 
-+#ifdef CONFIG_KSU_HYMOFS
-+bool hymo_is_avc_log_spoofing_enabled = false;
-+extern bool is_ksu_domain(void);
-+#endif
-+
- struct avc_entry {
- 	u32			ssid;
- 	u32			tsid;
-@@ -719,11 +724,24 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
- 
- 	rc = security_sid_to_context(sad->tsid, &tcontext,
- 				     &tcontext_len);
-+#ifdef CONFIG_KSU_HYMOFS
-+	if (system_state >= SYSTEM_RUNNING && unlikely(hymo_is_avc_log_spoofing_enabled && is_ksu_domain())) {
-+		if (rc)
-+			audit_log_format(ab, " tsid=%d", sad->tsid);
-+		else
-+			audit_log_format(ab, " tcontext=%s", "u:r:priv_app:s0:c512,c768");
-+		goto hymo_bypass_orig_flow;
-+	}
-+#endif
-+
- 	if (rc)
- 		audit_log_format(ab, " tsid=%d", sad->tsid);
- 	else
- 		audit_log_format(ab, " tcontext=%s", tcontext);
- 
-+#ifdef CONFIG_KSU_HYMOFS
-+hymo_bypass_orig_flow:
-+#endif
- 	tclass = secclass_map[sad->tclass-1].name;
- 	audit_log_format(ab, " tclass=%s", tclass);
- 
-diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
-index d4a99d98ec77..74678d2288b9 100644
---- a/security/selinux/hooks.c
-+++ b/security/selinux/hooks.c
-@@ -98,6 +98,13 @@
- #include "netif.h"
- #include "netnode.h"
- #include "netport.h"
-+
-+#ifdef CONFIG_KSU_HYMOFS_LSMBPS
-+/* HymoFS: direct function declarations for inline mode */
-+extern int hymofs_check_bypass(struct file *file);
-+extern int hymofs_check_inode_bypass(struct inode *inode);
-+extern int hymofs_check_setxattr_bypass(struct dentry *dentry, const char *name);
-+#endif
- #include "ibpkey.h"
- #include "xfrm.h"
- #include "netlabel.h"
-@@ -3100,6 +3107,13 @@ static int selinux_inode_permission(struct inode *inode, int mask)
- 	if (unlikely(IS_PRIVATE(inode)))
- 		return 0;
- 
-+#ifdef CONFIG_KSU_HYMOFS_LSMBPS
-+    /* HymoFS: direct call */
-+    if (hymofs_check_inode_bypass(inode)) {
-+        return 0;
-+    }
-+#endif
-+
- 	perms = file_mask_to_av(inode->i_mode, mask);
- 
- 	sid = cred_sid(cred);
-@@ -3177,6 +3191,13 @@ static int selinux_inode_setxattr(struct mnt_idmap *idmap,
- 	u32 newsid, sid = current_sid();
- 	int rc = 0;
- 
-+#ifdef CONFIG_KSU_HYMOFS_LSMBPS
-+    /* HymoFS: direct call */
-+    if (hymofs_check_setxattr_bypass(dentry, name)) {
-+        return 0;
-+    }
-+#endif
-+
- 	if (strcmp(name, XATTR_NAME_SELINUX)) {
- 		rc = cap_inode_setxattr(dentry, name, value, size, flags);
- 		if (rc)
-@@ -3958,6 +3979,13 @@ static int selinux_file_open(struct file *file)
- 	struct file_security_struct *fsec;
- 	struct inode_security_struct *isec;
- 
-+#ifdef CONFIG_KSU_HYMOFS_LSMBPS
-+    /* HymoFS: direct call */
-+    if (hymofs_check_bypass(file)) {
-+        return 0;
-+    }
-+#endif
-+
- 	fsec = selinux_file(file);
- 	isec = inode_security(file_inode(file));
- 	/*
