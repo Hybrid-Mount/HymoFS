@@ -238,10 +238,10 @@ index 5f4da5c8d5db..dca36dba4e44 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000000..20d59f0c7f1a
+index 000000000000..14e31b011f0c
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2291 @@
+@@ -0,0 +1,2301 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -627,6 +627,16 @@ index 000000000000..20d59f0c7f1a
 +            hymofs_spoof_mounts();
 +            hymofs_reorder_mnt_id();
 +        }
++        return 0;
++    }
++
++    if (cmd == HYMO_CMD_SET_ENABLED) {
++        int val;
++        if (copy_from_user(&val, arg, sizeof(val))) return -EFAULT;
++        spin_lock(&hymo_lock);
++        hymofs_enabled = !!val;
++        spin_unlock(&hymo_lock);
++        hymo_log("HymoFS %s\n", hymofs_enabled ? "enabled" : "disabled");
 +        return 0;
 +    }
 +
@@ -3073,10 +3083,10 @@ index a6eb8cbc7b4c..0e90d43fb57e 100644
  
 diff --git a/include/linux/hymo_magic.h b/include/linux/hymo_magic.h
 new file mode 100644
-index 000000000000..59ccc44af738
+index 000000000000..555ff989309b
 --- /dev/null
 +++ b/include/linux/hymo_magic.h
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,142 @@
 +#ifndef _LINUX_HYMO_MAGIC_H
 +#define _LINUX_HYMO_MAGIC_H
 +
@@ -3092,7 +3102,7 @@ index 000000000000..59ccc44af738
 +
 +#define HYMO_MAGIC1 0x48594D4F // "HYMO"
 +#define HYMO_MAGIC2 0x524F4F54 // "ROOT"
-+#define HYMO_PROTOCOL_VERSION 10
++#define HYMO_PROTOCOL_VERSION 11
 +#define HYMO_DEVICE_NAME "hymo"
 +
 +#define HYMO_MAX_LEN_PATHNAME 256
@@ -3133,6 +3143,7 @@ index 000000000000..59ccc44af738
 +#define HYMO_CMD_SET_UNAME 0x48017
 +#define HYMO_CMD_SET_CMDLINE 0x48018
 +#define HYMO_CMD_GET_FEATURES 0x48019
++#define HYMO_CMD_SET_ENABLED 0x48020
 +
 +struct hymo_syscall_arg {
 +    char *src;
