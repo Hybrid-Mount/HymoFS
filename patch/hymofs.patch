@@ -238,10 +238,10 @@ index cd60c7535..9cc2c307e 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..794d7a078
+index 000000000..eef44981f
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2318 @@
+@@ -0,0 +1,2317 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -1287,16 +1287,15 @@ index 000000000..794d7a078
 +    // Merge Rule Lookup (Walk up without allocation in hot path)
 +    p = pathname + path_len;
 +    while (p > pathname) {
++        size_t current_len;
 +        // Find last slash
 +        while (p > pathname && *p != '/') p--;
 +        if (p == pathname && *p != '/') break; // No more slashes
 +        
-+        {
 +        // Terminate to get parent (virtual)
-+        size_t current_len = p - pathname;
++        current_len = p - pathname;
 +        if (current_len == 0) { // Root
 +             // Handle root if needed, but usually we don't merge root
-+            }
 +            break;
 +        }
 +        
