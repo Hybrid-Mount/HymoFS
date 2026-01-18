@@ -2902,7 +2902,7 @@ index 09e8ed7d4..bf17f0bdb 100644
  	return error;
  }
 diff --git a/fs/stat.c b/fs/stat.c
-index 357a1db41..a9e4dcdca 100644
+index 357a1db41..abe976157 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
 @@ -23,6 +23,9 @@
@@ -2963,24 +2963,32 @@ index 357a1db41..a9e4dcdca 100644
  
  	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH |
  		      AT_STATX_SYNC_TYPE))
-@@ -219,6 +251,16 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
+@@ -219,6 +251,24 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
  
  retry:
  	error = user_path_at(dfd, filename, lookup_flags, &path);
 +
 +#ifdef CONFIG_HYMOFS_FORWARD_REDIRECT
 +	/* HymoFS: Handle merge directory - relative path + dirfd case */
-+	if (error == -ENOENT && dfd >= 0 && filename->name[0] != '/') {
-+		hymo_filename = hymofs_resolve_relative(dfd, filename->name);
-+		if (hymo_filename)
-+			error = filename_lookup(AT_FDCWD, hymo_filename, lookup_flags, &path, NULL);
++	/* 5.15 uses const char __user * for filename */
++	if (error == -ENOENT && dfd >= 0) {
++		char first_char;
++		if (get_user(first_char, filename) == 0 && first_char != '/') {
++			struct filename *kern_filename = getname(filename);
++			if (!IS_ERR(kern_filename)) {
++				hymo_filename = hymofs_resolve_relative(dfd, kern_filename->name);
++				putname(kern_filename);
++				if (hymo_filename)
++					error = filename_lookup(AT_FDCWD, hymo_filename, lookup_flags, &path, NULL);
++			}
++		}
 +	}
 +#endif
 +
  	if (error)
  		goto out;
  
-@@ -234,6 +276,10 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
+@@ -234,6 +284,10 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
  		goto retry;
  	}
  out:
