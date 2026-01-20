@@ -191,10 +191,10 @@ index 5f4da5c8d5db..ebc740c700f4 100644
  
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000000..33d93be578b0
+index 000000000000..f91841a17449
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2405 @@
+@@ -0,0 +1,2399 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -329,12 +329,6 @@ index 000000000000..33d93be578b0
 +    .fast_path_skips = ATOMIC64_INIT(0),
 +    .bloom_rejects = ATOMIC64_INIT(0),
 +    .rule_hits = ATOMIC64_INIT(0),
-+};
-+
-+/* Anonymous file operations for HymoFS fd */
-+static const struct file_operations hymo_anon_fops = {
-+    .owner = THIS_MODULE,
-+    .llseek = noop_llseek,
 +};
 +
 +/* RCU callback functions for deferred free */
