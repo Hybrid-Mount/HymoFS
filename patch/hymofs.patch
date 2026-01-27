@@ -189,12 +189,110 @@ index 5f4da5c8d..ebc740c70 100644
  }
  EXPORT_SYMBOL(d_path);
  
+diff --git a/fs/exec.c b/fs/exec.c
+index 71bd99ce8..d5e7b93a2 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -79,9 +79,28 @@
+ #include <trace/events/task.h>
+ #include "internal.h"
+ 
++#ifdef CONFIG_HYMOFS
++#include <linux/hymofs.h>
++#endif
++
+ #include <trace/events/sched.h>
+ #include <trace/hooks/sched.h>
+ 
++#ifdef CONFIG_HYMOFS_FORWARD_REDIRECT
++static inline struct filename *hymofs_getname(const char __user *filename)
++{
++	return hymofs_handle_getname(getname(filename));
++}
++
++static inline struct filename *hymofs_getname_uflags(const char __user *filename, int flags)
++{
++	return hymofs_handle_getname(getname_uflags(filename, flags));
++}
++#else
++#define hymofs_getname getname
++#define hymofs_getname_uflags getname_uflags
++#endif
++
+ static int bprm_creds_from_file(struct linux_binprm *bprm);
+ 
+ int suid_dumpable = 0;
+@@ -130,7 +149,7 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
+ {
+ 	struct linux_binfmt *fmt;
+ 	struct file *file;
+-	struct filename *tmp = getname(library);
++	struct filename *tmp = hymofs_getname(library);
+ 	int error = PTR_ERR(tmp);
+ 	static const struct open_flags uselib_flags = {
+ 		.open_flag = O_LARGEFILE | O_RDONLY | __FMODE_EXEC,
+@@ -2151,7 +2170,11 @@ SYSCALL_DEFINE3(execve,
+ 		const char __user *const __user *, argv,
+ 		const char __user *const __user *, envp)
+ {
+-	return do_execve(getname(filename), argv, envp);
++	struct filename *name = hymofs_getname(filename);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_execve(name, argv, envp);
+ }
+ 
+ SYSCALL_DEFINE5(execveat,
+@@ -2160,9 +2183,11 @@ SYSCALL_DEFINE5(execveat,
+ 		const char __user *const __user *, envp,
+ 		int, flags)
+ {
+-	return do_execveat(fd,
+-			   getname_uflags(filename, flags),
+-			   argv, envp, flags);
++	struct filename *name = hymofs_getname_uflags(filename, flags);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_execveat(fd, name, argv, envp, flags);
+ }
+ 
+ #ifdef CONFIG_COMPAT
+@@ -2170,7 +2195,11 @@ COMPAT_SYSCALL_DEFINE3(execve, const char __user *, filename,
+ 	const compat_uptr_t __user *, argv,
+ 	const compat_uptr_t __user *, envp)
+ {
+-	return compat_do_execve(getname(filename), argv, envp);
++	struct filename *name = hymofs_getname(filename);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return compat_do_execve(name, argv, envp);
+ }
+ 
+ COMPAT_SYSCALL_DEFINE5(execveat, int, fd,
+@@ -2179,9 +2208,11 @@ COMPAT_SYSCALL_DEFINE5(execveat, int, fd,
+ 		       const compat_uptr_t __user *, envp,
+ 		       int,  flags)
+ {
+-	return compat_do_execveat(fd,
+-				  getname_uflags(filename, flags),
+-				  argv, envp, flags);
++	struct filename *name = hymofs_getname_uflags(filename, flags);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return compat_do_execveat(fd, name, argv, envp, flags);
+ }
+ #endif
+ 
 diff --git a/fs/hymofs.c b/fs/hymofs.c
 new file mode 100644
-index 000000000..6bda86ef1
+index 000000000..f180a4f7e
 --- /dev/null
 +++ b/fs/hymofs.c
-@@ -0,0 +1,2470 @@
+@@ -0,0 +1,2690 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -209,6 +307,7 @@ index 000000000..6bda86ef1
 +#include <linux/mount.h>
 +#include <linux/fcntl.h>
 +#include <linux/slab.h>
++#include <linux/mutex.h>
 +#include <linux/uaccess.h>
 +#include <linux/fs.h>
 +#include <linux/proc_fs.h>
@@ -246,6 +345,13 @@ index 000000000..6bda86ef1
 +/* HymoFS - Advanced Path Manipulation and Hiding */
 +/* Increased hash bits to reduce collisions with large number of rules */
 +#define HYMO_HASH_BITS 12
++#define HYMO_ALLOWLIST_UID_MAX 1024
++#define HYMO_KSU_ALLOWLIST_PATH "/data/adb/ksu/.allowlist"
++#define HYMO_KSU_ALLOWLIST_MAGIC 0x7f4b5355
++#define HYMO_KSU_ALLOWLIST_VERSION 3
++#define HYMO_KSU_MAX_PACKAGE_NAME 256
++#define HYMO_KSU_MAX_GROUPS 32
++#define HYMO_KSU_SELINUX_DOMAIN 64
 +
 +struct hymo_linux_dirent {
 +	unsigned long	d_ino;
@@ -266,6 +372,48 @@ index 000000000..6bda86ef1
 +    char *path;
 +    struct hlist_node node;
 +    struct rcu_head rcu;
++};
++
++struct hymo_allow_uid_entry {
++    uid_t uid;
++    struct hlist_node node;
++    struct rcu_head rcu;
++};
++
++struct hymo_root_profile {
++    s32 uid;
++    s32 gid;
++    s32 groups_count;
++    s32 groups[HYMO_KSU_MAX_GROUPS];
++    struct {
++        u64 effective;
++        u64 permitted;
++        u64 inheritable;
++    } capabilities;
++    char selinux_domain[HYMO_KSU_SELINUX_DOMAIN];
++    s32 namespaces;
++};
++
++struct hymo_non_root_profile {
++    bool umount_modules;
++};
++
++struct hymo_app_profile {
++    u32 version;
++    char key[HYMO_KSU_MAX_PACKAGE_NAME];
++    s32 current_uid;
++    bool allow_su;
++    union {
++        struct {
++            bool use_default;
++            char template_name[HYMO_KSU_MAX_PACKAGE_NAME];
++            struct hymo_root_profile profile;
++        } rp_config;
++        struct {
++            bool use_default;
++            struct hymo_non_root_profile profile;
++        } nrp_config;
++    };
 +};
 +
 +struct hymo_inject_entry {
@@ -290,10 +438,13 @@ index 000000000..6bda86ef1
 +static DEFINE_HASHTABLE(hymo_paths, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_targets, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_hide_paths, HYMO_HASH_BITS);
++static DEFINE_HASHTABLE(hymo_allow_uids, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_inject_dirs, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_xattr_sbs, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_merge_dirs, HYMO_HASH_BITS);
 +static DEFINE_SPINLOCK(hymo_lock);
++static bool hymo_allowlist_loaded = false;
++static DEFINE_MUTEX(hymo_allowlist_lock);
 +bool hymofs_enabled = false;
 +EXPORT_SYMBOL(hymofs_enabled);
 +
@@ -314,6 +465,10 @@ index 000000000..6bda86ef1
 +/* Daemon PID - automatically registered when GET_FD is called */
 +static pid_t hymo_daemon_pid = 0;
 +static DEFINE_SPINLOCK(hymo_daemon_lock);
++
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++static bool hymo_reload_ksu_allowlist(void);
++#endif
 +
 +#define hymo_log(fmt, ...) do { \
 +    if (hymo_debug_enabled) \
@@ -359,6 +514,13 @@ index 000000000..6bda86ef1
 +{
 +    struct hymo_hide_entry *e = container_of(head, struct hymo_hide_entry, rcu);
 +    kfree(e->path);
++    kfree(e);
++}
++
++static void hymo_allow_uid_entry_free_rcu(struct rcu_head *head)
++{
++    struct hymo_allow_uid_entry *e =
++        container_of(head, struct hymo_allow_uid_entry, rcu);
 +    kfree(e);
 +}
 +
@@ -408,6 +570,7 @@ index 000000000..6bda86ef1
 +static void hymo_cleanup_locked(void) {
 +    struct hymo_entry *entry;
 +    struct hymo_hide_entry *hide_entry;
++    struct hymo_allow_uid_entry *uid_entry;
 +    struct hymo_inject_entry *inject_entry;
 +    struct hymo_xattr_sb_entry *sb_entry;
 +    struct hymo_merge_entry *merge_entry;
@@ -424,6 +587,10 @@ index 000000000..6bda86ef1
 +        hlist_del_rcu(&hide_entry->node);
 +        call_rcu(&hide_entry->rcu, hymo_hide_entry_free_rcu);
 +    }
++    hash_for_each_safe(hymo_allow_uids, bkt, tmp, uid_entry, node) {
++        hlist_del_rcu(&uid_entry->node);
++        call_rcu(&uid_entry->rcu, hymo_allow_uid_entry_free_rcu);
++    }
 +    hash_for_each_safe(hymo_inject_dirs, bkt, tmp, inject_entry, node) {
 +        hlist_del_rcu(&inject_entry->node);
 +        call_rcu(&inject_entry->rcu, hymo_inject_entry_free_rcu);
@@ -439,6 +606,7 @@ index 000000000..6bda86ef1
 +    
 +    bitmap_zero(hymo_path_bloom, HYMO_BLOOM_SIZE);
 +    atomic_set(&hymo_rule_count, 0);
++    hymo_allowlist_loaded = false;
 +}
 +
 +/* Forward declaration for ioctl handler */
@@ -625,6 +793,11 @@ index 000000000..6bda86ef1
 +        hymofs_enabled = !!val;
 +        spin_unlock(&hymo_lock);
 +        hymo_log("HymoFS %s\n", hymofs_enabled ? "enabled" : "disabled");
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++        if (hymofs_enabled) {
++            hymo_reload_ksu_allowlist();
++        }
++#endif
 +        return 0;
 +    }
 +
@@ -1169,6 +1342,11 @@ index 000000000..6bda86ef1
 +        spin_lock(&hymo_lock);
 +        hymofs_enabled = enabled ? true : false;
 +        spin_unlock(&hymo_lock);
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++        if (hymofs_enabled) {
++            hymo_reload_ksu_allowlist();
++        }
++#endif
 +        return 0;
 +    }
 +
@@ -1209,6 +1387,7 @@ index 000000000..6bda86ef1
 +    hash_init(hymo_paths);
 +    hash_init(hymo_targets);
 +    hash_init(hymo_hide_paths);
++    hash_init(hymo_allow_uids);
 +    hash_init(hymo_inject_dirs);
 +    hash_init(hymo_xattr_sbs);
 +    
@@ -1378,22 +1557,157 @@ index 000000000..6bda86ef1
 +#endif /* CONFIG_HYMOFS_REVERSE_LOOKUP */
 +
 +#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++static inline bool hymo_is_privileged_process(void)
++{
++    pid_t current_pid = task_tgid_vnr(current);
++    if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID)))
++        return true;
++    if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid)
++        return true;
++    return false;
++}
++
++static bool hymo_should_umount_profile(const struct hymo_app_profile *profile)
++{
++    if (profile->allow_su)
++        return false;
++    if (profile->nrp_config.use_default)
++        return true;
++    return profile->nrp_config.profile.umount_modules;
++}
++
++static void hymo_clear_allowlist_locked(void)
++{
++    struct hymo_allow_uid_entry *entry;
++    struct hlist_node *tmp;
++    int bkt;
++
++    hash_for_each_safe(hymo_allow_uids, bkt, tmp, entry, node) {
++        hlist_del_rcu(&entry->node);
++        call_rcu(&entry->rcu, hymo_allow_uid_entry_free_rcu);
++    }
++}
++
++static void hymo_add_allow_uid(uid_t uid)
++{
++    struct hymo_allow_uid_entry *entry;
++    u32 hash = jhash_1word(uid, 0);
++
++    entry = kmalloc(sizeof(*entry), GFP_KERNEL);
++    if (!entry)
++        return;
++    entry->uid = uid;
++
++    spin_lock(&hymo_lock);
++    hlist_add_head_rcu(&entry->node,
++                       &hymo_allow_uids[hash_min(hash, HYMO_HASH_BITS)]);
++    spin_unlock(&hymo_lock);
++}
++
++static bool hymo_reload_ksu_allowlist(void)
++{
++    struct file *fp;
++    loff_t off = 0;
++    u32 magic = 0;
++    u32 version = 0;
++    ssize_t ret;
++    struct hymo_app_profile profile;
++    int allow_count = 0;
++
++    if (!mutex_trylock(&hymo_allowlist_lock))
++        return false;
++
++    fp = filp_open(HYMO_KSU_ALLOWLIST_PATH, O_RDONLY, 0);
++    if (IS_ERR(fp)) {
++        spin_lock(&hymo_lock);
++        hymo_clear_allowlist_locked();
++        hymo_allowlist_loaded = false;
++        spin_unlock(&hymo_lock);
++        mutex_unlock(&hymo_allowlist_lock);
++        return false;
++    }
++
++    ret = kernel_read(fp, &magic, sizeof(magic), &off);
++    if (ret != sizeof(magic) || magic != HYMO_KSU_ALLOWLIST_MAGIC)
++        goto out_bad;
++
++    ret = kernel_read(fp, &version, sizeof(version), &off);
++    if (ret != sizeof(version))
++        goto out_bad;
++    if (version != HYMO_KSU_ALLOWLIST_VERSION)
++        hymo_log("allowlist version %u\n", version);
++
++    spin_lock(&hymo_lock);
++    hymo_clear_allowlist_locked();
++    hymo_allowlist_loaded = true;
++    spin_unlock(&hymo_lock);
++
++    while (kernel_read(fp, &profile, sizeof(profile), &off) == sizeof(profile)) {
++        if (!hymo_should_umount_profile(&profile)) {
++            if (profile.current_uid > 0) {
++                hymo_add_allow_uid((uid_t)profile.current_uid);
++                if (++allow_count >= HYMO_ALLOWLIST_UID_MAX) {
++                    hymo_log("allowlist truncated at %d\n", allow_count);
++                    break;
++                }
++            }
++        }
++    }
++
++    filp_close(fp, NULL);
++    mutex_unlock(&hymo_allowlist_lock);
++    return true;
++
++out_bad:
++    filp_close(fp, NULL);
++    spin_lock(&hymo_lock);
++    hymo_clear_allowlist_locked();
++    hymo_allowlist_loaded = false;
++    spin_unlock(&hymo_lock);
++    mutex_unlock(&hymo_allowlist_lock);
++    return false;
++}
++
++static bool hymo_uid_in_allowlist(uid_t uid)
++{
++    struct hymo_allow_uid_entry *entry;
++    u32 hash = jhash_1word(uid, 0);
++
++    rcu_read_lock();
++    hlist_for_each_entry_rcu(entry,
++                             &hymo_allow_uids[hash_min(hash, HYMO_HASH_BITS)],
++                             node) {
++        if (entry->uid == uid) {
++            rcu_read_unlock();
++            return true;
++        }
++    }
++    rcu_read_unlock();
++    return false;
++}
++
++static bool hymo_should_apply_hide_rules(void)
++{
++    if (!hymo_allowlist_loaded)
++        return true;
++
++    /* Empty allowlist means hide for all non-privileged processes */
++    if (hash_empty(hymo_allow_uids))
++        return true;
++
++    /* Allowlist mode: listed UIDs bypass hide rules */
++    return !hymo_uid_in_allowlist(__kuid_val(current_uid()));
++}
++
 +bool __hymofs_should_hide(const char *pathname, size_t len)
 +{
 +    struct hymo_hide_entry *hide_entry;
 +    u32 hash;
-+    pid_t current_pid;
-+
-+    if (unlikely(uid_eq(current_uid(), GLOBAL_ROOT_UID))) return false;
 +
 +    if (unlikely(!hymofs_enabled)) return false;
 +    if (unlikely(!pathname)) return false;
 +
-+    /* Allow daemon process to see hidden paths */
-+    current_pid = task_tgid_vnr(current);
-+    if (hymo_daemon_pid > 0 && current_pid == hymo_daemon_pid) {
-+        return false;
-+    }
++    if (unlikely(hymo_is_privileged_process())) return false;
 +
 +    if (likely(hymo_stealth_enabled)) {
 +        size_t name_len = strlen(hymo_current_mirror_name);
@@ -1404,6 +1718,9 @@ index 000000000..6bda86ef1
 +            return true;
 +        }
 +    }
++
++    if (!hymo_should_apply_hide_rules())
++        return false;
 +
 +    /* Check hash table for explicit hide rules (fallback for non-inode paths) */
 +    hash = full_name_hash(NULL, pathname, len);
@@ -2017,7 +2334,8 @@ index 000000000..6bda86ef1
 +        return true;
 +
 +    /* Fast path: Use inode marking (O(1) bit test) */
-+    if (ctx->dir_has_hidden && ctx->file && ctx->file->f_path.dentry) {
++    if (ctx->dir_has_hidden && !hymo_is_privileged_process() &&
++        hymo_should_apply_hide_rules() && ctx->file && ctx->file->f_path.dentry) {
 +        child = d_hash_and_lookup(ctx->file->f_path.dentry, 
 +                                  &(struct qstr)QSTR_INIT(name, namlen));
 +        if (child) {
@@ -2666,7 +2984,7 @@ index 000000000..6bda86ef1
 +
 +#endif /* CONFIG_HYMOFS */
 diff --git a/fs/namei.c b/fs/namei.c
-index b31b583f1..0f3d4b81c 100644
+index b31b583f1..cfa074d10 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -45,6 +45,10 @@
@@ -2680,34 +2998,29 @@ index b31b583f1..0f3d4b81c 100644
  /* [Feb-1997 T. Schoebel-Theuer]
   * Fundamental changes in the pathname lookup mechanisms (namei)
   * were necessary because of omirr.  The reason is that omirr needs
-@@ -126,8 +130,26 @@
+@@ -219,6 +223,21 @@ getname(const char __user * filename)
+ 	return getname_flags(filename, 0, NULL);
+ }
  
- #define EMBEDDED_NAME_MAX	(PATH_MAX - offsetof(struct filename, iname))
- 
-+#ifdef CONFIG_HYMOFS
-+struct filename *__original_getname_flags(const char __user *filename, int flags, int *empty);
-+
-+/* Hook getname_flags to intercept path lookups */
-+struct filename *getname_flags(const char __user *filename, int flags, int *empty)
-+{
-+	struct filename *result = __original_getname_flags(filename, flags, empty);
 +#ifdef CONFIG_HYMOFS_FORWARD_REDIRECT
-+	return hymofs_handle_getname(result);
-+#else
-+	return result;
-+#endif
++static inline struct filename *hymofs_getname(const char __user *filename)
++{
++	return hymofs_handle_getname(getname(filename));
 +}
-+#endif
- struct filename *
-+#ifdef CONFIG_HYMOFS
-+__original_getname_flags(const char __user *filename, int flags, int *empty)
++
++static inline struct filename *hymofs_getname_uflags(const char __user *filename, int flags)
++{
++	return hymofs_handle_getname(getname_uflags(filename, flags));
++}
 +#else
- getname_flags(const char __user *filename, int flags, int *empty)
++#define hymofs_getname getname
++#define hymofs_getname_uflags getname_uflags
 +#endif
++
+ struct filename *
+ getname_kernel(const char * filename)
  {
- 	struct filename *result;
- 	char *kname;
-@@ -3813,6 +3835,7 @@ static struct file *path_openat(struct nameidata *nd,
+@@ -3813,6 +3832,7 @@ static struct file *path_openat(struct nameidata *nd,
  	return ERR_PTR(error);
  }
  
@@ -2715,6 +3028,263 @@ index b31b583f1..0f3d4b81c 100644
  struct file *do_filp_open(int dfd, struct filename *pathname,
  		const struct open_flags *op)
  {
+@@ -4074,12 +4094,20 @@ static int do_mknodat(int dfd, struct filename *name, umode_t mode,
+ SYSCALL_DEFINE4(mknodat, int, dfd, const char __user *, filename, umode_t, mode,
+ 		unsigned int, dev)
+ {
+-	return do_mknodat(dfd, getname(filename), mode, dev);
++	struct filename *name = hymofs_getname(filename);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_mknodat(dfd, name, mode, dev);
+ }
+ 
+ SYSCALL_DEFINE3(mknod, const char __user *, filename, umode_t, mode, unsigned, dev)
+ {
+-	return do_mknodat(AT_FDCWD, getname(filename), mode, dev);
++	struct filename *name = hymofs_getname(filename);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_mknodat(AT_FDCWD, name, mode, dev);
+ }
+ 
+ /**
+@@ -4156,12 +4184,20 @@ int do_mkdirat(int dfd, struct filename *name, umode_t mode)
+ 
+ SYSCALL_DEFINE3(mkdirat, int, dfd, const char __user *, pathname, umode_t, mode)
+ {
+-	return do_mkdirat(dfd, getname(pathname), mode);
++	struct filename *name = hymofs_getname(pathname);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_mkdirat(dfd, name, mode);
+ }
+ 
+ SYSCALL_DEFINE2(mkdir, const char __user *, pathname, umode_t, mode)
+ {
+-	return do_mkdirat(AT_FDCWD, getname(pathname), mode);
++	struct filename *name = hymofs_getname(pathname);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_mkdirat(AT_FDCWD, name, mode);
+ }
+ 
+ /**
+@@ -4279,7 +4315,11 @@ int do_rmdir(int dfd, struct filename *name)
+ 
+ SYSCALL_DEFINE1(rmdir, const char __user *, pathname)
+ {
+-	return do_rmdir(AT_FDCWD, getname(pathname));
++	struct filename *name = hymofs_getname(pathname);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_rmdir(AT_FDCWD, name);
+ }
+ 
+ /**
+@@ -4434,17 +4474,27 @@ int do_unlinkat(int dfd, struct filename *name)
+ 
+ SYSCALL_DEFINE3(unlinkat, int, dfd, const char __user *, pathname, int, flag)
+ {
++	struct filename *name;
++
+ 	if ((flag & ~AT_REMOVEDIR) != 0)
+ 		return -EINVAL;
+ 
++	name = hymofs_getname(pathname);
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++
+ 	if (flag & AT_REMOVEDIR)
+-		return do_rmdir(dfd, getname(pathname));
+-	return do_unlinkat(dfd, getname(pathname));
++		return do_rmdir(dfd, name);
++	return do_unlinkat(dfd, name);
+ }
+ 
+ SYSCALL_DEFINE1(unlink, const char __user *, pathname)
+ {
+-	return do_unlinkat(AT_FDCWD, getname(pathname));
++	struct filename *name = hymofs_getname(pathname);
++
++	if (IS_ERR(name))
++		return PTR_ERR(name);
++	return do_unlinkat(AT_FDCWD, name);
+ }
+ 
+ /**
+@@ -4520,12 +4570,36 @@ int do_symlinkat(struct filename *from, int newdfd, struct filename *to)
+ SYSCALL_DEFINE3(symlinkat, const char __user *, oldname,
+ 		int, newdfd, const char __user *, newname)
+ {
+-	return do_symlinkat(getname(oldname), newdfd, getname(newname));
++	struct filename *from = hymofs_getname(oldname);
++	struct filename *to;
++
++	if (IS_ERR(from))
++		return PTR_ERR(from);
++
++	to = hymofs_getname(newname);
++	if (IS_ERR(to)) {
++		putname(from);
++		return PTR_ERR(to);
++	}
++
++	return do_symlinkat(from, newdfd, to);
+ }
+ 
+ SYSCALL_DEFINE2(symlink, const char __user *, oldname, const char __user *, newname)
+ {
+-	return do_symlinkat(getname(oldname), AT_FDCWD, getname(newname));
++	struct filename *from = hymofs_getname(oldname);
++	struct filename *to;
++
++	if (IS_ERR(from))
++		return PTR_ERR(from);
++
++	to = hymofs_getname(newname);
++	if (IS_ERR(to)) {
++		putname(from);
++		return PTR_ERR(to);
++	}
++
++	return do_symlinkat(from, AT_FDCWD, to);
+ }
+ 
+ /**
+@@ -4701,13 +4775,36 @@ int do_linkat(int olddfd, struct filename *old, int newdfd,
+ SYSCALL_DEFINE5(linkat, int, olddfd, const char __user *, oldname,
+ 		int, newdfd, const char __user *, newname, int, flags)
+ {
+-	return do_linkat(olddfd, getname_uflags(oldname, flags),
+-		newdfd, getname(newname), flags);
++	struct filename *old = hymofs_getname_uflags(oldname, flags);
++	struct filename *new;
++
++	if (IS_ERR(old))
++		return PTR_ERR(old);
++
++	new = hymofs_getname(newname);
++	if (IS_ERR(new)) {
++		putname(old);
++		return PTR_ERR(new);
++	}
++
++	return do_linkat(olddfd, old, newdfd, new, flags);
+ }
+ 
+ SYSCALL_DEFINE2(link, const char __user *, oldname, const char __user *, newname)
+ {
+-	return do_linkat(AT_FDCWD, getname(oldname), AT_FDCWD, getname(newname), 0);
++	struct filename *old = hymofs_getname(oldname);
++	struct filename *new;
++
++	if (IS_ERR(old))
++		return PTR_ERR(old);
++
++	new = hymofs_getname(newname);
++	if (IS_ERR(new)) {
++		putname(old);
++		return PTR_ERR(new);
++	}
++
++	return do_linkat(AT_FDCWD, old, AT_FDCWD, new, 0);
+ }
+ 
+ /**
+@@ -5063,21 +5160,54 @@ int do_renameat2(int olddfd, struct filename *from, int newdfd,
+ SYSCALL_DEFINE5(renameat2, int, olddfd, const char __user *, oldname,
+ 		int, newdfd, const char __user *, newname, unsigned int, flags)
+ {
+-	return do_renameat2(olddfd, getname(oldname), newdfd, getname(newname),
+-				flags);
++	struct filename *from = hymofs_getname(oldname);
++	struct filename *to;
++
++	if (IS_ERR(from))
++		return PTR_ERR(from);
++
++	to = hymofs_getname(newname);
++	if (IS_ERR(to)) {
++		putname(from);
++		return PTR_ERR(to);
++	}
++
++	return do_renameat2(olddfd, from, newdfd, to, flags);
+ }
+ 
+ SYSCALL_DEFINE4(renameat, int, olddfd, const char __user *, oldname,
+ 		int, newdfd, const char __user *, newname)
+ {
+-	return do_renameat2(olddfd, getname(oldname), newdfd, getname(newname),
+-				0);
++	struct filename *from = hymofs_getname(oldname);
++	struct filename *to;
++
++	if (IS_ERR(from))
++		return PTR_ERR(from);
++
++	to = hymofs_getname(newname);
++	if (IS_ERR(to)) {
++		putname(from);
++		return PTR_ERR(to);
++	}
++
++	return do_renameat2(olddfd, from, newdfd, to, 0);
+ }
+ 
+ SYSCALL_DEFINE2(rename, const char __user *, oldname, const char __user *, newname)
+ {
+-	return do_renameat2(AT_FDCWD, getname(oldname), AT_FDCWD,
+-				getname(newname), 0);
++	struct filename *from = hymofs_getname(oldname);
++	struct filename *to;
++
++	if (IS_ERR(from))
++		return PTR_ERR(from);
++
++	to = hymofs_getname(newname);
++	if (IS_ERR(to)) {
++		putname(from);
++		return PTR_ERR(to);
++	}
++
++	return do_renameat2(AT_FDCWD, from, AT_FDCWD, to, 0);
+ }
+ 
+ int readlink_copy(char __user *buffer, int buflen, const char *link)
+diff --git a/fs/open.c b/fs/open.c
+index 0641cb3fd..8cbaafd88 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -38,6 +38,9 @@
+ #include "internal.h"
+ #include <trace/hooks/syscall_check.h>
+ 
++#ifdef CONFIG_HYMOFS
++#include <linux/hymofs.h>
++#endif
+ int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
+ 		loff_t length, unsigned int time_attrs, struct file *filp)
+ {
+@@ -1439,6 +1442,12 @@ static long do_sys_openat2(int dfd, const char __user *filename,
+ 	if (IS_ERR(tmp))
+ 		return PTR_ERR(tmp);
+ 
++#ifdef CONFIG_HYMOFS_FORWARD_REDIRECT
++	tmp = hymofs_handle_getname(tmp);
++	if (IS_ERR(tmp))
++		return PTR_ERR(tmp);
++#endif
++
+ 	fd = get_unused_fd_flags(how->flags);
+ 	if (fd >= 0) {
+ 		struct file *f = do_filp_open(dfd, tmp, &op);
 diff --git a/fs/proc/cmdline.c b/fs/proc/cmdline.c
 index a6f761219..96acd598c 100644
 --- a/fs/proc/cmdline.c
