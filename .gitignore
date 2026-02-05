@@ -53,3 +53,8 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+local.properties
+.idea/
+manager_app/
+.DS_Store
