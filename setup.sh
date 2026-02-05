@@ -87,6 +87,9 @@ if [ "$MANUAL_BRANCH" = false ]; then
             elif [ "$KVER" -eq 6 ] && [ "$KPATCH" -eq 6 ]; then
                 BRANCH="android15_6.6"
                 echo ">>> Auto-selected branch: $BRANCH"
+            elif [ "$KVER" -eq 6 ] && [ "$KPATCH" -eq 12 ]; then
+                BRANCH="android16_6.12"
+                echo ">>> Auto-selected branch: $BRANCH"
             elif [ "$KVER" -eq 5 ] && [ "$KPATCH" -eq 15 ]; then
                 BRANCH="android13_5.15"
                 echo ">>> Auto-selected branch: $BRANCH"
