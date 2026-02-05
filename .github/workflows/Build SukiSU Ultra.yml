@@ -3,14 +3,14 @@ name: Build SukiSU Ultra
 env:
   CPU: sm8550
   FEIL: oneplus_11_b
-  ANDROID_VERSION: android13
+  ANDROID_VERSION: android14
   KERNEL_VERSION: 5.15
   APPLY_HYMOFS: On
 
 on:
   push:
     branches:
-      - android13_5.15
+      - android14_5.15
          
 jobs:
   build:
