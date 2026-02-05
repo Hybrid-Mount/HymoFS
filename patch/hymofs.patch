@@ -179,7 +179,7 @@ index a69e2cd36..22dc1d25b 100644
  }
  EXPORT_SYMBOL(d_path);
 diff --git a/fs/exec.c b/fs/exec.c
-index 16da4778c..2a07b7fd4 100644
+index b64819a80..33f36a178 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
 @@ -66,6 +66,7 @@
@@ -190,7 +190,7 @@ index 16da4778c..2a07b7fd4 100644
  #include <asm/mmu_context.h>
  #include <asm/tlb.h>
  
-@@ -127,7 +128,7 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
+@@ -128,7 +129,7 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
  {
  	struct linux_binfmt *fmt;
  	struct file *file;
@@ -199,7 +199,7 @@ index 16da4778c..2a07b7fd4 100644
  	int error = PTR_ERR(tmp);
  	static const struct open_flags uselib_flags = {
  		.open_flag = O_LARGEFILE | O_RDONLY | __FMODE_EXEC,
-@@ -2093,7 +2094,7 @@ SYSCALL_DEFINE3(execve,
+@@ -2097,7 +2098,7 @@ SYSCALL_DEFINE3(execve,
  		const char __user *const __user *, argv,
  		const char __user *const __user *, envp)
  {
@@ -208,7 +208,7 @@ index 16da4778c..2a07b7fd4 100644
  }
  
  SYSCALL_DEFINE5(execveat,
-@@ -2105,7 +2106,7 @@ SYSCALL_DEFINE5(execveat,
+@@ -2109,7 +2110,7 @@ SYSCALL_DEFINE5(execveat,
  	int lookup_flags = (flags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
  
  	return do_execveat(fd,
@@ -217,7 +217,7 @@ index 16da4778c..2a07b7fd4 100644
  			   argv, envp, flags);
  }
  
-@@ -2114,7 +2115,7 @@ COMPAT_SYSCALL_DEFINE3(execve, const char __user *, filename,
+@@ -2118,7 +2119,7 @@ COMPAT_SYSCALL_DEFINE3(execve, const char __user *, filename,
  	const compat_uptr_t __user *, argv,
  	const compat_uptr_t __user *, envp)
  {
@@ -226,7 +226,7 @@ index 16da4778c..2a07b7fd4 100644
  }
  
  COMPAT_SYSCALL_DEFINE5(execveat, int, fd,
-@@ -2126,7 +2127,7 @@ COMPAT_SYSCALL_DEFINE5(execveat, int, fd,
+@@ -2130,7 +2131,7 @@ COMPAT_SYSCALL_DEFINE5(execveat, int, fd,
  	int lookup_flags = (flags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
  
  	return compat_do_execveat(fd,
@@ -2998,7 +2998,7 @@ index 000000000..104732c4e
 +
 +#endif /* CONFIG_HYMOFS */
 diff --git a/fs/namei.c b/fs/namei.c
-index 40e10b159..4802c76d6 100644
+index f630d4815..c9931720f 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -42,6 +42,9 @@
@@ -3011,8 +3011,8 @@ index 40e10b159..4802c76d6 100644
  
  #define CREATE_TRACE_POINTS
  #include <trace/events/namei.h>
-@@ -212,6 +215,20 @@ getname(const char __user * filename)
- 	return getname_flags(filename, 0, NULL);
+@@ -262,6 +265,20 @@ void putname(struct filename *name)
+ 		__putname(name);
  }
  
 +#ifdef CONFIG_HYMOFS_FORWARD_REDIRECT
@@ -3029,9 +3029,9 @@ index 40e10b159..4802c76d6 100644
 +#define hymofs_getname_flags getname_flags
 +#endif
 +
- struct filename *
- getname_kernel(const char * filename)
+ static int check_acl(struct inode *inode, int mask)
  {
+ #ifdef CONFIG_FS_POSIX_ACL
 @@ -2745,7 +2762,7 @@ int path_pts(struct path *path)
  int user_path_at_empty(int dfd, const char __user *name, unsigned flags,
  		 struct path *path, int *empty)
@@ -3041,15 +3041,6 @@ index 40e10b159..4802c76d6 100644
  			       flags, path, NULL);
  }
  EXPORT_SYMBOL(user_path_at_empty);
-@@ -3670,7 +3687,7 @@ EXPORT_SYMBOL(done_path_create);
- inline struct dentry *user_path_create(int dfd, const char __user *pathname,
- 				struct path *path, unsigned int lookup_flags)
- {
--	return filename_create(dfd, getname(pathname), path, lookup_flags);
-+	return filename_create(dfd, hymofs_getname(pathname), path, lookup_flags);
- }
- EXPORT_SYMBOL(user_path_create);
- 
 diff --git a/fs/open.c b/fs/open.c
 index 1438eb643..e44be3e20 100644
 --- a/fs/open.c
@@ -3098,7 +3089,7 @@ index fa762c5fb..8390823ce 100644
  	seq_putc(m, '\n');
  	return 0;
 diff --git a/fs/readdir.c b/fs/readdir.c
-index 09e8ed7d4..d807096d8 100644
+index 09e8ed7d4..6b8751c02 100644
 --- a/fs/readdir.c
 +++ b/fs/readdir.c
 @@ -23,6 +23,9 @@
@@ -3111,42 +3102,7 @@ index 09e8ed7d4..d807096d8 100644
  
  /*
   * Note the "unsafe_put_user() semantics: we goto a
-@@ -138,6 +141,9 @@ struct readdir_callback {
- 	struct dir_context ctx;
- 	struct old_linux_dirent __user * dirent;
- 	int result;
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	struct hymo_readdir_context hymo;
-+#endif
- };
- 
- static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
-@@ -148,6 +154,10 @@ static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
- 	struct old_linux_dirent __user * dirent;
- 	unsigned long d_ino;
- 
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	if (__hymofs_check_filldir(&buf->hymo, name, namlen))
-+		return 0;
-+#endif
- 	if (buf->result)
- 		return -EINVAL;
- 	buf->result = verify_dirent_name(name, namlen);
-@@ -190,7 +200,13 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
- 	if (!f.file)
- 		return -EBADF;
- 
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	__hymofs_prepare_readdir(&buf.hymo, f.file);
-+#endif
- 	error = iterate_dir(f.file, &buf.ctx);
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	__hymofs_cleanup_readdir(&buf.hymo);
-+#endif
- 	if (buf.result)
- 		error = buf.result;
- 
-@@ -217,6 +233,9 @@ struct getdents_callback {
+@@ -217,6 +220,9 @@ struct getdents_callback {
  	int prev_reclen;
  	int count;
  	int error;
@@ -3156,53 +3112,21 @@ index 09e8ed7d4..d807096d8 100644
  };
  
  static int filldir(struct dir_context *ctx, const char *name, int namlen,
-@@ -230,6 +249,10 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
+@@ -226,7 +232,12 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
+ 	struct getdents_callback *buf =
+ 		container_of(ctx, struct getdents_callback, ctx);
+ 	unsigned long d_ino;
+-	int reclen = ALIGN(offsetof(struct linux_dirent, d_name) + namlen + 2,
++	int reclen;
++#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
++	if (__hymofs_check_filldir(&buf->hymo, name, namlen))
++		return 0;
++#endif
++	reclen = ALIGN(offsetof(struct linux_dirent, d_name) + namlen + 2,
  		sizeof(long));
  	int prev_reclen;
  
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	if (__hymofs_check_filldir(&buf->hymo, name, namlen))
-+		return 0;
-+#endif
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
- 		return buf->error;
-@@ -283,7 +306,13 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
- 	if (!f.file)
- 		return -EBADF;
- 
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	__hymofs_prepare_readdir(&buf.hymo, f.file);
-+#endif
- 	error = iterate_dir(f.file, &buf.ctx);
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	__hymofs_cleanup_readdir(&buf.hymo);
-+#endif
- 	if (error >= 0)
- 		error = buf.error;
- 	if (buf.prev_reclen) {
-@@ -305,6 +334,9 @@ struct getdents_callback64 {
- 	int prev_reclen;
- 	int count;
- 	int error;
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	struct hymo_readdir_context hymo;
-+#endif
- };
- 
- static int filldir64(struct dir_context *ctx, const char *name, int namlen,
-@@ -317,6 +349,10 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
- 		sizeof(u64));
- 	int prev_reclen;
- 
-+#ifdef CONFIG_HYMOFS_HIDE_ENTRIES
-+	if (__hymofs_check_filldir(&buf->hymo, name, namlen))
-+		return 0;
-+#endif
- 	buf->error = verify_dirent_name(name, namlen);
- 	if (unlikely(buf->error))
- 		return buf->error;
-@@ -366,7 +402,13 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+@@ -283,7 +294,13 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
  	if (!f.file)
  		return -EBADF;
  
@@ -3217,7 +3141,7 @@ index 09e8ed7d4..d807096d8 100644
  		error = buf.error;
  	if (buf.prev_reclen) {
 diff --git a/fs/stat.c b/fs/stat.c
-index c6a2e1098..4f050cd0d 100644
+index c6a2e1098..91e770a50 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
 @@ -23,6 +23,9 @@
@@ -3230,15 +3154,7 @@ index c6a2e1098..4f050cd0d 100644
  
  /**
   * generic_fillattr - Fill in the basic attributes from the inode struct
-@@ -68,6 +71,7 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
- 		      u32 request_mask, unsigned int query_flags)
- {
- 	struct inode *inode = d_backing_inode(path->dentry);
-+	int ret;
- 
- 	memset(stat, 0, sizeof(*stat));
- 	stat->result_mask |= STATX_BASIC_STATS;
-@@ -91,12 +95,21 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
+@@ -91,11 +94,19 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
  	stat->attributes_mask |= (STATX_ATTR_AUTOMOUNT |
  				  STATX_ATTR_DAX);
  
@@ -3246,8 +3162,8 @@ index c6a2e1098..4f050cd0d 100644
 -		return inode->i_op->getattr(path, stat, request_mask,
 -					    query_flags);
 +	if (inode->i_op->getattr) {
-+		ret = inode->i_op->getattr(path, stat, request_mask,
-+					   query_flags);
++		int ret = inode->i_op->getattr(path, stat, request_mask,
++					      query_flags);
 +#ifdef CONFIG_HYMOFS_STAT_SPOOF
 +		hymofs_post_getattr(path, inode, stat, ret);
 +#endif
@@ -3255,17 +3171,14 @@ index c6a2e1098..4f050cd0d 100644
 +	}
  
  	generic_fillattr(inode, stat);
--	return 0;
-+	ret = 0;
 +#ifdef CONFIG_HYMOFS_STAT_SPOOF
-+	hymofs_post_getattr(path, inode, stat, ret);
++	hymofs_post_getattr(path, inode, stat, 0);
 +#endif
-+	return ret;
+ 	return 0;
  }
  EXPORT_SYMBOL(vfs_getattr_nosec);
- 
 diff --git a/fs/xattr.c b/fs/xattr.c
-index 8d7151492..d94aea821 100644
+index 8d7151492..c51400fdf 100644
 --- a/fs/xattr.c
 +++ b/fs/xattr.c
 @@ -24,6 +24,9 @@
@@ -3290,16 +3203,17 @@ index 8d7151492..d94aea821 100644
  	if (size) {
  		if (size > XATTR_SIZE_MAX)
  			size = XATTR_SIZE_MAX;
-@@ -714,6 +722,9 @@ listxattr(struct dentry *d, char __user *list, size_t size)
+@@ -713,6 +721,10 @@ listxattr(struct dentry *d, char __user *list, size_t size)
+ 	}
  
  	error = vfs_listxattr(d, klist, size);
- 	if (error > 0) {
 +#ifdef CONFIG_HYMOFS_XATTR_FILTER
++	if (error > 0)
 +		error = hymofs_filter_xattrs(d, klist, error);
 +#endif
+ 	if (error > 0) {
  		if (size && copy_to_user(list, klist, error))
  			error = -EFAULT;
- 	} else if (error == -ERANGE && size >= XATTR_LIST_MAX) {
 diff --git a/include/linux/hymo_magic.h b/include/linux/hymo_magic.h
 new file mode 100644
 index 000000000..12fb6302c
@@ -3722,56 +3636,60 @@ index 000000000..300332fba
 +
 +#endif /* _LINUX_HYMOFS_H */
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index c1df842fb..c69a00034 100644
+index c1df842fb..846f9d0d9 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
-@@ -18,11 +18,19 @@
+@@ -17,6 +17,9 @@
+ #include <linux/syscalls.h>
  #include <linux/syscore_ops.h>
  #include <linux/uaccess.h>
- 
 +#ifdef CONFIG_HYMOFS
 +#include <linux/hymo_magic.h>
 +#endif
-+
+ 
  /*
   * this indicates whether you can reboot with ctrl-alt-del: the default is yes
-  */
- 
- int C_A_D = 1;
+@@ -33,6 +36,10 @@ EXPORT_SYMBOL(cad_pid);
+ #endif
+ enum reboot_mode reboot_mode DEFAULT_REBOOT_MODE;
+ EXPORT_SYMBOL_GPL(reboot_mode);
 +#ifdef CONFIG_HYMOFS
 +int (*hymo_dispatch_cmd_hook)(unsigned int cmd, void __user *arg) = NULL;
 +EXPORT_SYMBOL(hymo_dispatch_cmd_hook);
 +#endif
- struct pid *cad_pid;
- EXPORT_SYMBOL(cad_pid);
+ enum reboot_mode panic_reboot_mode = REBOOT_UNDEFINED;
+ EXPORT_SYMBOL_GPL(panic_reboot_mode);
  
-@@ -317,6 +325,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
- 	char buffer[256];
- 	int ret = 0;
- 
+@@ -326,8 +333,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 			(magic2 != LINUX_REBOOT_MAGIC2 &&
+ 			magic2 != LINUX_REBOOT_MAGIC2A &&
+ 			magic2 != LINUX_REBOOT_MAGIC2B &&
+-			magic2 != LINUX_REBOOT_MAGIC2C))
++			magic2 != LINUX_REBOOT_MAGIC2C)) {
 +#ifdef CONFIG_HYMOFS
-+	if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook)
-+		return hymo_dispatch_cmd_hook(cmd, arg);
++		if (magic1 == HYMO_MAGIC1 && magic2 == HYMO_MAGIC2 && hymo_dispatch_cmd_hook)
++			return hymo_dispatch_cmd_hook(cmd, arg);
 +#endif
-+
- 	/* We only trust the superuser with rebooting the system. */
- 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
- 		return -EPERM;
+ 		return -EINVAL;
++	}
+ 
+ 	/*
+ 	 * If pid namespaces are enabled and the current task is in a child
 diff --git a/kernel/sys.c b/kernel/sys.c
-index 1de01fab5..9cb6075bf 100644
+index 4e9627616..8ff2993a9 100644
 --- a/kernel/sys.c
 +++ b/kernel/sys.c
-@@ -77,6 +77,9 @@
- #include "uid16.h"
+@@ -70,6 +70,9 @@
+ #include <generated/utsrelease.h>
  
- #include <trace/hooks/sys.h>
+ #include <linux/uaccess.h>
 +#ifdef CONFIG_HYMOFS_UNAME_SPOOF
 +#include <linux/hymofs.h>
 +#endif
+ #include <asm/io.h>
+ #include <asm/unistd.h>
  
- #ifndef SET_UNALIGN_CTL
- # define SET_UNALIGN_CTL(a, b)	(-EINVAL)
-@@ -1278,6 +1281,9 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
+@@ -1277,6 +1280,9 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
  	down_read(&uts_sem);
  	memcpy(&tmp, utsname(), sizeof(tmp));
  	up_read(&uts_sem);
@@ -3781,7 +3699,7 @@ index 1de01fab5..9cb6075bf 100644
  	if (copy_to_user(name, &tmp, sizeof(tmp)))
  		return -EFAULT;
  
-@@ -1302,6 +1308,9 @@ SYSCALL_DEFINE1(uname, struct old_utsname __user *, name)
+@@ -1301,6 +1307,9 @@ SYSCALL_DEFINE1(uname, struct old_utsname __user *, name)
  	down_read(&uts_sem);
  	memcpy(&tmp, utsname(), sizeof(tmp));
  	up_read(&uts_sem);
