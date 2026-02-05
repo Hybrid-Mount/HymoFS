@@ -1,8 +1,8 @@
 diff --git a/fs/Kconfig b/fs/Kconfig
-index 2c756044e..591c466df 100644
+index 2c756044e..faeedaa40 100644
 --- a/fs/Kconfig
 +++ b/fs/Kconfig
-@@ -387,4 +387,136 @@ source "fs/unicode/Kconfig"
+@@ -387,4 +387,137 @@ source "fs/unicode/Kconfig"
  config IO_WQ
  	bool
  
@@ -138,6 +138,7 @@ index 2c756044e..591c466df 100644
 +	  MUST be disabled in production builds.
 +	  If unsure, say N.
 +
++endmenu
  endmenu
 diff --git a/fs/Makefile b/fs/Makefile
 index e4adb9882..8a88ab632 100644
