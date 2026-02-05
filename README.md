@@ -25,16 +25,18 @@ Redirect and hide rules are stored in hash tables in kernel; rules can be added/
 
 ## Supported kernels
 
-Patch and `setup.sh` target **Android GKI-style** trees. Version is auto-detected from `Makefile` (VERSION / PATCHLEVEL); corresponding branch is used when cloning this repo:
+**All mainstream GKI kernel versions are supported.** The patch and `setup.sh` target **Android GKI-style** trees; version is auto-detected from the kernel `Makefile` (VERSION / PATCHLEVEL), and the matching patch or branch is used.
 
-| Kernel | Branch |
-|--------|--------|
-| 5.15 (Android 13) | `android13_5.15` |
-| 6.1 (Android 14) | `android14_6.1` |
-| 6.6 (Android 15) | `android15_6.6` |
-| 6.12 (Android 16) | `android16_6.12` |
+| Kernel | Typical Android |
+|--------|------------------|
+| **5.10** | Android 12 / 13 |
+| **5.15** | Android 13 / 14 |
+| **6.1**  | Android 14 |
+| **6.6**  | Android 15 |
+| **6.12** | Android 16 |
 
-If your tree layout differs (e.g. no `common/`), you can point to the kernel root and defconfig explicitly (see **Installation**).
+- The script selects the matching patch or branch from the kernel `Makefile` (VERSION / PATCHLEVEL).
+- If your tree layout differs (e.g. no `common/`), you can point to the kernel root and defconfig explicitly (see **Installation**).
 
 ---
 

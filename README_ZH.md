@@ -25,16 +25,18 @@ HymoFS 是一个面向 Linux（Android GKI）的**内核级路径重定向与隐
 
 ## 支持的内核版本
 
-补丁与 `setup.sh` 针对 **Android GKI 风格** 内核树。脚本会根据 `Makefile` 中的 VERSION / PATCHLEVEL 自动选择本仓库分支：
+**已支持所有主流 GKI 内核版本**。补丁与 `setup.sh` 针对 **Android GKI 风格** 内核树，通过单源 + 内核版本宏（`LINUX_VERSION_CODE`）兼容以下版本：
 
-| 内核版本 | 分支名 |
-|----------|--------|
-| 5.15 (Android 13) | `android13_5.15` |
-| 6.1 (Android 14) | `android14_6.1` |
-| 6.6 (Android 15) | `android15_6.6` |
-| 6.12 (Android 16) | `android16_6.12` |
+| 内核版本 | 典型 Android 版本 |
+|----------|--------------------|
+| **5.10** | Android 12 / 13 |
+| **5.15** | Android 13 / 14 |
+| **6.1**  | Android 14 |
+| **6.6**  | Android 15 |
+| **6.12** | Android 16 |
 
-若你的内核树布局不同（例如没有 `common/`），可手动指定内核根目录和 defconfig（见 **安装**）。
+- 脚本会根据内核树 `Makefile` 的 VERSION / PATCHLEVEL 自动选择对应补丁或分支。
+- 若内核树布局不同（例如没有 `common/`），可手动指定内核根目录和 defconfig（见 **安装**）。
 
 ---
 
