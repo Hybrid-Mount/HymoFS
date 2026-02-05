@@ -1,7 +1,7 @@
 name: Build SukiSU Ultra
 
 env:
-  CPU: sm855ß0
+  CPU: sm8550
   FEIL: oneplus_11_b
   ANDROID_VERSION: android13
   KERNEL_VERSION: 5.15
