@@ -152,4 +152,13 @@ Rule and path lengths are limited (e.g. `HYMO_MAX_LEN_PATHNAME`). Structures and
 
 ## License
 
-See [LICENSE](LICENSE) in this repository.
+- **Author's work** — Licensed under **Apache License 2.0 (Apache-2.0)**. Use, copy, modify, and distribute under Apache-2.0 when not linked with the Linux kernel.
+
+- **Kernel use** — When used as a **Linux kernel module (LKM)** or built into the kernel (e.g. in-tree patch), **GNU General Public License v2.0 (GPL-2.0)** applies for kernel compatibility.
+
+- [LICENSE](LICENSE) — dual-license summary  
+- [LICENSE-Apache-2.0](LICENSE-Apache-2.0) — Apache 2.0 full text  
+- [LICENSE-GPL-2.0](LICENSE-GPL-2.0) — GPL-2.0 full text  
+- [NOTICE](NOTICE) — copyright and license notice  
+
+SPDX-License-Identifier: Apache-2.0 OR GPL-2.0
