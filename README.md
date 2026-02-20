@@ -130,7 +130,7 @@ Rule and path lengths are limited (e.g. `HYMO_MAX_LEN_PATHNAME`). Structures and
 
 ## Integration
 
-- **[meta-hymo](https://github.com/KernelSU-Modules-Repo/hymo)** (Hymo): C++ module manager for KernelSU that can use HymoFS for mounting overlays. It runs the HymoFS daemon and configures rules; the kernel patch is required only when using HymoFS mode.
+- **[hymo](https://github.com/Anatdx/hymo)** (Hymo): C++ module manager for KernelSU that can use HymoFS for mounting overlays. It runs the HymoFS daemon and configures rules; the kernel patch is required only when using HymoFS mode.
 - **KernelSU**: HymoFS can hide or redirect paths used by SU and modules (e.g. `/data/adb/`, overlay mounts). Allowlist and profile structures in the patch (e.g. KSU allowlist path) are for integration with KernelSU-aware logic.
 
 ---
