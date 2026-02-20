@@ -46,18 +46,3 @@ jobs:
         with:
           name: hymofs-lkm-all
           path: lkm/
-
-      - name: Create zip archive
-        run: |
-          zip -r hymofs-lkm.zip lkm/
-
-      - name: Prepare and upload zip artifact
-        run: |
-          mkdir -p dist
-          cp hymofs-lkm.zip dist/
-
-      - name: Upload zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: hymofs-lkm-zip
-          path: dist/
