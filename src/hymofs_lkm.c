@@ -2186,6 +2186,15 @@ passthrough:
 #define HYMO_REG4(regs)		((regs)->r8)
 #define HYMO_LR(regs)		(*(unsigned long *)(regs)->sp)
 #define HYMO_POP_STACK(regs)	do { (regs)->sp += 8; } while (0)
+#elif defined(__arm__)
+/* ARM32: pt_regs uses uregs[] (r0=0, r1=1, ..., lr=14, pc=15) */
+#define HYMO_REG0(regs)		((regs)->uregs[0])
+#define HYMO_REG1(regs)		((regs)->uregs[1])
+#define HYMO_REG2(regs)		((regs)->uregs[2])
+#define HYMO_REG3(regs)		((regs)->uregs[3])
+#define HYMO_REG4(regs)		((regs)->uregs[4])
+#define HYMO_LR(regs)		((regs)->uregs[14])
+#define HYMO_POP_STACK(regs)	do { } while (0)
 #else
 #define HYMO_REG0(regs)		(0)
 #define HYMO_REG1(regs)		(0)
