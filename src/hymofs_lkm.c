@@ -150,9 +150,6 @@ static void hymofs_resolve_kallsyms_lookup(void)
  * Part 5: Global State
  * ====================================================================== */
 
-static struct hymo_merge_trie_node *hymo_merge_trie_root __rcu;
-static DEFINE_SPINLOCK(hymo_merge_trie_lock);
-
 static DEFINE_HASHTABLE(hymo_paths, HYMO_HASH_BITS);
 static DEFINE_HASHTABLE(hymo_targets, HYMO_HASH_BITS);
 static DEFINE_HASHTABLE(hymo_hide_paths, HYMO_HASH_BITS);
@@ -252,103 +249,7 @@ static void hymo_merge_entry_free_rcu(struct rcu_head *head)
 }
 
 /* ======================================================================
- * Part 7: Merge Trie
- * ====================================================================== */
-
-static void hymo_merge_trie_free_node(struct hymo_merge_trie_node *n)
-{
-	struct hymo_merge_trie_node *c, *next;
-
-	if (!n)
-		return;
-	for (c = n->first_child; c; c = next) {
-		next = c->next_sibling;
-		hymo_merge_trie_free_node(c);
-	}
-	kfree(n->comp);
-	kfree(n);
-}
-
-static void hymo_merge_trie_free_rcu(struct rcu_head *head)
-{
-	struct hymo_merge_trie_node *root =
-		container_of(head, struct hymo_merge_trie_node, rcu);
-	hymo_merge_trie_free_node(root);
-}
-
-/* Build trie from hymo_merge_dirs. Must hold hymo_merge_lock. */
-static void hymo_merge_trie_build_locked(void)
-{
-	struct hymo_merge_trie_node *new_root, *old_root, *cur, **slot;
-	struct hymo_merge_entry *me;
-	const char *path, *start;
-	char *comp;
-	size_t comp_len;
-	int bkt;
-
-	spin_lock(&hymo_merge_trie_lock);
-	new_root = kzalloc(sizeof(*new_root), GFP_ATOMIC);
-	if (!new_root) {
-		spin_unlock(&hymo_merge_trie_lock);
-		return;
-	}
-
-	hash_for_each(hymo_merge_dirs, bkt, me, node) {
-		if (!me->src)
-			continue;
-		path = me->src;
-		while (*path == '/')
-			path++;
-		cur = new_root;
-		while (*path) {
-			start = path;
-			while (*path && *path != '/')
-				path++;
-			comp_len = (size_t)(path - start);
-			if (comp_len == 0) {
-				if (*path) path++;
-				continue;
-			}
-			comp = kmalloc(comp_len + 1, GFP_ATOMIC);
-			if (!comp)
-				break;
-			memcpy(comp, start, comp_len);
-			comp[comp_len] = '\0';
-			for (slot = &cur->first_child; *slot;
-			     slot = &(*slot)->next_sibling) {
-				if ((*slot)->comp_len == comp_len &&
-				    memcmp((*slot)->comp, comp, comp_len) == 0)
-					break;
-			}
-			if (!*slot) {
-				*slot = kzalloc(sizeof(struct hymo_merge_trie_node),
-						GFP_ATOMIC);
-				if (!*slot) {
-					kfree(comp);
-					break;
-				}
-				(*slot)->comp = comp;
-				(*slot)->comp_len = comp_len;
-			} else {
-				kfree(comp);
-			}
-			cur = *slot;
-			if (*path == '/')
-				path++;
-		}
-		cur->entry = me;
-	}
-
-	old_root = rcu_dereference_protected(hymo_merge_trie_root,
-				lockdep_is_held(&hymo_merge_trie_lock));
-	rcu_assign_pointer(hymo_merge_trie_root, new_root);
-	if (old_root)
-		call_rcu(&old_root->rcu, hymo_merge_trie_free_rcu);
-	spin_unlock(&hymo_merge_trie_lock);
-}
-
-/* ======================================================================
- * Part 8: Inode Marking
+ * Part 7: Inode Marking
  * ====================================================================== */
 
 static inline void hymofs_mark_inode_hidden(struct inode *inode)
@@ -364,6 +265,21 @@ static inline bool hymofs_is_inode_hidden_bit(struct inode *inode)
 	return test_bit(AS_FLAGS_HYMO_HIDE, &inode->i_mapping->flags);
 }
 
+/* Mark directory inode as having inject/merge rules (fast path for iterate_dir).
+ * Call from process context only; kern_path can sleep. */
+static void hymofs_mark_dir_has_inject(const char *path_str)
+{
+	struct path p;
+
+	if (!path_str || !hymo_kern_path)
+		return;
+	if (hymo_kern_path(path_str, LOOKUP_FOLLOW, &p) != 0)
+		return;
+	if (p.dentry && d_inode(p.dentry) && d_inode(p.dentry)->i_mapping)
+		set_bit(AS_FLAGS_HYMO_DIR_HAS_INJECT, &d_inode(p.dentry)->i_mapping->flags);
+	path_put(&p);
+}
+
 /* ======================================================================
  * Part 9: Cleanup
  * ====================================================================== */
@@ -376,7 +292,6 @@ static void hymo_cleanup_locked(void)
 	struct hymo_xattr_sb_entry *sb_entry;
 	struct hymo_merge_entry *merge_entry;
 	struct hlist_node *tmp;
-	struct hymo_merge_trie_node *old_trie;
 	int bkt;
 
 	hash_for_each_safe(hymo_paths, bkt, tmp, entry, node) {
@@ -401,14 +316,6 @@ static void hymo_cleanup_locked(void)
 		hlist_del_rcu(&merge_entry->node);
 		call_rcu(&merge_entry->rcu, hymo_merge_entry_free_rcu);
 	}
-
-	spin_lock(&hymo_merge_trie_lock);
-	old_trie = rcu_dereference_protected(hymo_merge_trie_root,
-				lockdep_is_held(&hymo_merge_trie_lock));
-	rcu_assign_pointer(hymo_merge_trie_root, NULL);
-	if (old_trie)
-		call_rcu(&old_trie->rcu, hymo_merge_trie_free_rcu);
-	spin_unlock(&hymo_merge_trie_lock);
 
 	bitmap_zero(hymo_path_bloom, HYMO_BLOOM_SIZE);
 	bitmap_zero(hymo_hide_bloom, HYMO_BLOOM_SIZE);
@@ -782,6 +689,7 @@ hymo_mat_filldir(struct dir_context *ctx, const char *name,
 	inj_dir = kstrdup(mc->src_prefix, GFP_KERNEL);
 	if (inj_dir)
 		hymofs_add_inject_rule(inj_dir);
+	hymofs_mark_dir_has_inject(mc->src_prefix);
 
 	if (d_type == DT_DIR && mc->depth < 8)
 		hymofs_materialize_merge(src_path, tgt_path, mc->depth + 1);
@@ -1379,7 +1287,6 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 						&hymo_merge_dirs[hash_min(hash, HYMO_HASH_BITS)]);
 					src = NULL;
 					target = NULL;
-					hymo_merge_trie_build_locked();
 				} else {
 					ret = -ENOMEM;
 				}
@@ -1392,6 +1299,9 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 				hymofs_add_inject_rule(kstrdup(me->src, GFP_KERNEL));
 				if (me->resolved_src)
 					hymofs_add_inject_rule(kstrdup(me->resolved_src, GFP_KERNEL));
+				hymofs_mark_dir_has_inject(me->src);
+				if (me->resolved_src)
+					hymofs_mark_dir_has_inject(me->resolved_src);
 				if (mat_src && mat_tgt)
 					hymofs_materialize_merge(mat_src, mat_tgt, 0);
 			}
@@ -1535,8 +1445,10 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		}
 		spin_unlock(&hymo_rules_lock);
 
-		if (parent_dir)
+		if (parent_dir) {
 			hymofs_add_inject_rule(parent_dir);
+			hymofs_mark_dir_has_inject(parent_dir);
+		}
 
 		/* Inode marking: hide source in dir listing; mark parent for fast filldir skip. */
 		if (src_inode) {
@@ -2795,19 +2707,22 @@ static HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *
 
 	if (w->parent_dentry) {
 		dir_inode = d_inode(w->parent_dentry);
-		if (dir_inode && dir_inode->i_mapping)
+		if (dir_inode && dir_inode->i_mapping) {
 			w->dir_has_hidden = test_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
 						     &dir_inode->i_mapping->flags);
+			/* Fast path: if dir has no inject flag, skip rcu_read_lock + hash traversal */
+			w->dir_has_inject = test_bit(AS_FLAGS_HYMO_DIR_HAS_INJECT,
+						    &dir_inode->i_mapping->flags);
+		}
 		dname = w->parent_dentry->d_name.name;
 		if (dname[0] == 'd' && dname[1] == 'e' && dname[2] == 'v' && dname[3] == '\0')
 			w->dir_path_len = 4;
 
 		/*
-		 * Build full directory path for inject/merge rule lookup.
-		 * d_absolute_path / dentry_path_raw use only seqlocks + rcu
-		 * (non-sleeping on non-PREEMPT_RT); safe in kprobe pre-handler.
+		 * Only when dir_has_inject (from flag) is true: build full path and
+		 * traverse hash to get merge_target_dentries. Most dirs skip this.
 		 */
-		if (atomic_read(&hymo_rule_count) > 0) {
+		if (atomic_read(&hymo_rule_count) > 0 && w->dir_has_inject) {
 			char *buf = this_cpu_ptr(hymo_iterate_dir_path);
 			char *dp = ERR_PTR(-ENOENT);
 

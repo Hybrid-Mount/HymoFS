@@ -73,7 +73,7 @@ curl -LSs https://raw.githubusercontent.com/Anatdx/HymoFS/main/setup.sh | bash -
 ### After applying the patch
 
 1. Build the kernel as usual. HymoFS is built as part of the kernel (`fs/hymofs.c`, `CONFIG_HYMOFS=y`).
-2. Ensure a userspace daemon (e.g. [meta-hymo](https://github.com/KernelSU-Modules-Repo/hymo)) obtains the HymoFS fd and configures redirect/hide rules; otherwise the patch is inert.
+2. Ensure a userspace daemon (e.g. [hymo](https://github.com/Anatdx/hymo)) obtains the HymoFS fd and configures redirect/hide rules; otherwise the patch is inert.
 
 ---
 
@@ -112,7 +112,7 @@ So it hooks path resolution (namei, getname in exec/open), `d_path`, readdir/fil
 
 ## Userspace API
 
-- **Privileged fd**: Userspace obtains a single fd (e.g. via the HYMO_CMD_GET_FD supercall or equivalent). All control is done via **ioctl** on that fd. Definitions are in `include/linux/hymo_magic.h` (or the copy in meta-hymo).
+- **Privileged fd**: Userspace obtains a single fd (e.g. via the HYMO_CMD_GET_FD supercall or equivalent). All control is done via **ioctl** on that fd. Definitions are in `include/linux/hymo_magic.h` (or the copy in hymo).
 - **Protocol version**: `HYMO_PROTOCOL_VERSION` (e.g. 12). Daemon and kernel should agree.
 - **Main ioctls** (see `hymo_magic.h` for full list):
   - `HYMO_IOC_ADD_RULE` / `HYMO_IOC_DEL_RULE`: add/remove redirect rule (src → target).
@@ -124,7 +124,7 @@ So it hooks path resolution (namei, getname in exec/open), `d_path`, readdir/fil
   - `HYMO_IOC_SET_DEBUG`, `HYMO_IOC_GET_VERSION`, `HYMO_IOC_LIST_RULES`, etc.
   - Optional: `HYMO_IOC_ADD_SPOOF_KSTAT`, `HYMO_IOC_SET_UNAME`, `HYMO_IOC_SET_CMDLINE`, `HYMO_IOC_SET_HIDE_UIDS`, etc.
 
-Rule and path lengths are limited (e.g. `HYMO_MAX_LEN_PATHNAME`). Structures and magic numbers are shared between kernel and userspace (e.g. meta-hymo's `hymofs.cpp` / `hymo_magic.h`).
+Rule and path lengths are limited (e.g. `HYMO_MAX_LEN_PATHNAME`). Structures and magic numbers are shared between kernel and userspace (e.g. hymo's `hymofs.cpp` / `hymo_magic.h`).
 
 ---
 

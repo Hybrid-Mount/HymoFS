@@ -39,6 +39,9 @@
 /* Marks an inode for kstat spoofing */
 #define AS_FLAGS_HYMO_SPOOF_KSTAT 42
 #define BIT_HYMO_SPOOF_KSTAT BIT(42)
+/* Marks a directory as having inject/merge rules (fast path for iterate_dir) */
+#define AS_FLAGS_HYMO_DIR_HAS_INJECT 43
+#define BIT_HYMO_DIR_HAS_INJECT BIT(43)
 #endif // #ifdef __KERNEL__
 
 /* Syscall number: 142 = SYS_reboot on aarch64; we kprobe __arm64_sys_reboot (5.10 compatible). */
