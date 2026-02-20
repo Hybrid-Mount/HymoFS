@@ -2201,7 +2201,7 @@ static HYMO_NOCFI void hymo_sys_enter_handler(void *data, struct pt_regs *regs, 
 	char *buf;
 	char *target;
 	char __user *new_path;
-	unsigned long *path_reg;
+	u64 *path_reg;
 
 	(void)data;
 
@@ -2214,7 +2214,7 @@ static HYMO_NOCFI void hymo_sys_enter_handler(void *data, struct pt_regs *regs, 
 
 	/* execve: path in parm1; openat/faccessat/newfstatat/execveat: path in parm2 */
 	path_reg = (id == __NR_execve) ? &HYMO_REG0(regs) : &HYMO_REG1(regs);
-	filename_user = (const char __user *)*path_reg;
+	filename_user = (const char __user *)(uintptr_t)*path_reg;
 	if (!filename_user)
 		return;
 
@@ -2238,7 +2238,7 @@ static HYMO_NOCFI void hymo_sys_enter_handler(void *data, struct pt_regs *regs, 
 	if (unlikely(hymofs_should_hide(buf))) {
 		new_path = hymo_userspace_stack_buffer(HYMO_HIDE_PATH, sizeof(HYMO_HIDE_PATH));
 		if (new_path) {
-			*path_reg = (unsigned long)new_path;
+			*path_reg = (u64)(uintptr_t)new_path;
 		}
 		return;
 	}
@@ -2257,7 +2257,7 @@ static HYMO_NOCFI void hymo_sys_enter_handler(void *data, struct pt_regs *regs, 
 		new_path = hymo_userspace_stack_buffer(target, tlen);
 		kfree(target);
 		if (new_path)
-			*path_reg = (unsigned long)new_path;
+			*path_reg = (u64)(uintptr_t)new_path;
 	}
 }
 
