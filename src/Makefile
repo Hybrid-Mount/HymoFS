@@ -6,8 +6,8 @@
 # To disable VFS kprobes if bootloop (GET_FD + uname only):
 #   make ... ccflags-y="-DHYMOFS_VFS_KPROBES=0"  (or add to EXTRA_CFLAGS)
 #
-# To use sys_enter tracepoint for path redirect (YukiSU-style, needs CONFIG_HAVE_SYSCALL_TRACEPOINTS):
-#   make ... ccflags-y="-DHYMOFS_USE_SYSCALL_TRACEPOINT=1"
+# To force getname_flags kprobe instead of sys_enter tracepoint (default):
+#   make ... ccflags-y="-DHYMOFS_USE_SYSCALL_TRACEPOINT=0"
 #
 
 obj-m += hymofs_lkm.o
