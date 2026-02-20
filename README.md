@@ -124,7 +124,7 @@ So it hooks path resolution (namei, getname in exec/open), `d_path`, readdir/fil
   - `HYMO_IOC_SET_DEBUG`, `HYMO_IOC_GET_VERSION`, `HYMO_IOC_LIST_RULES`, etc.
   - Optional: `HYMO_IOC_ADD_SPOOF_KSTAT`, `HYMO_IOC_SET_UNAME`, `HYMO_IOC_SET_CMDLINE`, `HYMO_IOC_SET_HIDE_UIDS`, etc.
 
-Rule and path lengths are limited (e.g. `HYMO_MAX_LEN_PATHNAME`). Structures and magic numbers are shared between kernel and userspace (e.g. meta-hymo’s `hymofs.cpp` / `hymo_magic.h`).
+Rule and path lengths are limited (e.g. `HYMO_MAX_LEN_PATHNAME`). Structures and magic numbers are shared between kernel and userspace (e.g. meta-hymo's `hymofs.cpp` / `hymo_magic.h`).
 
 ---
 
@@ -138,7 +138,7 @@ Rule and path lengths are limited (e.g. `HYMO_MAX_LEN_PATHNAME`). Structures and
 ## Risks and limitations
 
 - **Stability**: Modifying core VFS/namei and readdir is intrusive. Bugs can cause kernel panics, freezes, or data corruption. Prefer testing on non-critical devices.
-- **Performance**: Redirect/hide checks add cost to open, exec, readdir, and d_path. Sub-features (inject, stat spoof, debug) add more. Disable what you don’t need.
+- **Performance**: Redirect/hide checks add cost to open, exec, readdir, and d_path. Sub-features (inject, stat spoof, debug) add more. Disable what you don't need.
 - **Compatibility**: May conflict with other filesystem or security patches (e.g. SELinux, other overlay/hide schemes). One HymoFS patch variant may also touch `security/selinux/avc.c`; check your tree.
 - **Security**: Running with a privileged HymoFS daemon and kernel patch broadens the TCB. Use only in controlled/root environments.
 
