@@ -2,6 +2,7 @@ obj-m += hymofs_lkm.o
 
 ccflags-y += -gz=none
 ccflags-y += $(call cc-option,-fno-sanitize=cfi)
+ccflags-y += -Wno-unknown-sanitizers
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
