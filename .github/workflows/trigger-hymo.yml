@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       hymofs_ref:
-        description: 'HymoFS ref for hymo to clone (e.g. lkm, main)'
+        description: 'HymoFS ref for hymo to clone (e.g. main)'
         required: true
-        default: 'lkm'
+        default: 'main'
       hymo_ref:
-        description: 'Branch of hymo repo to run workflow on (e.g. lkm or main)'
+        description: 'Branch of hymo repo to run workflow on (e.g. main)'
         required: false
-        default: 'lkm'
+        default: 'main'
 
 jobs:
   trigger:
