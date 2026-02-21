@@ -43,6 +43,14 @@
 #include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <linux/xattr.h>
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS)
+#include <asm/unistd.h>
+#include <linux/sched/task_stack.h>
+#include <trace/events/syscalls.h>
+#define HYMOFS_TP_AVAILABLE 1
+#else
+#define HYMOFS_TP_AVAILABLE 0
+#endif
 
 #include "hymofs_lkm.h"
 
@@ -61,6 +69,16 @@ MODULE_VERSION(HYMOFS_VERSION);
  */
 #ifndef HYMOFS_VFS_KPROBES
 #define HYMOFS_VFS_KPROBES 1
+#endif
+
+/*
+ * Use sys_enter tracepoint for path redirect instead of getname_flags kprobe.
+ * Requires CONFIG_HAVE_SYSCALL_TRACEPOINTS. Falls back to getname_flags if
+ * tracepoint registration fails. Build with -DHYMOFS_USE_SYSCALL_TRACEPOINT=1
+ * to try.
+ */
+#ifndef HYMOFS_USE_SYSCALL_TRACEPOINT
+#define HYMOFS_USE_SYSCALL_TRACEPOINT 0
 #endif
 
 /*
@@ -2175,13 +2193,116 @@ passthrough:
 static long (*hymo_strncpy_from_user_nofault)(char *dst, const void __user *src,
                                               long count);
 
-/* getname_flags pre-handler: only modify user path and regs; return 0 to run
- * original. */
-static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p,
-                                                struct pt_regs *regs) {
-  const char __user *filename_user;
-  char *buf;
-  char *target;
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+/* Path for hide: non-existent so syscall fails with ENOENT */
+#define HYMO_HIDE_PATH "/.hymo_hidden_placeholder"
+
+static char __user *hymo_userspace_stack_buffer(const char *data, size_t len)
+{
+	char __user *p;
+
+	if (!current->mm)
+		return NULL;
+	p = (void __user *)current_user_stack_pointer() - len;
+	return copy_to_user(p, data, len) ? NULL : p;
+}
+
+static inline bool hymo_tp_check_path_syscall(long id)
+{
+	switch (id) {
+	case __NR_openat:
+	case __NR_faccessat:
+	case __NR_newfstatat:
+	case __NR_execve:
+#ifdef __NR_execveat
+	case __NR_execveat:
+#endif
+#ifdef __NR_openat2
+	case __NR_openat2:
+#endif
+		return true;
+	default:
+		return false;
+	}
+}
+
+static HYMO_NOCFI void hymo_sys_enter_handler(void *data, struct pt_regs *regs, long id)
+{
+	const char __user *filename_user;
+	char *buf;
+	char *target;
+	char __user *new_path;
+	unsigned long *path_reg;
+
+	(void)data;
+
+	if (!hymo_tp_check_path_syscall(id))
+		return;
+	if (atomic_long_read(&hymo_ioctl_tgid) == (long)task_tgid_vnr(current))
+		return;
+	if (atomic_long_read(&hymo_xattr_source_tgid) == (long)task_tgid_vnr(current))
+		return;
+
+	/* execve: path in parm1; openat/faccessat/newfstatat/execveat: path in parm2 */
+	path_reg = (id == __NR_execve) ? &HYMO_REG0(regs) : &HYMO_REG1(regs);
+	filename_user = (const char __user *)*path_reg;
+	if (!filename_user)
+		return;
+
+	buf = this_cpu_ptr(hymo_getname_path_buf);
+	if (hymo_strncpy_from_user_nofault) {
+		long ret = hymo_strncpy_from_user_nofault(buf, filename_user, HYMO_PATH_BUF - 1);
+		if (ret < 0)
+			return;
+		buf[ret < (long)(HYMO_PATH_BUF - 1) ? ret : (long)(HYMO_PATH_BUF - 1)] = '\0';
+	} else {
+		if (copy_from_user(buf, filename_user, HYMO_PATH_BUF - 1))
+			return;
+		buf[HYMO_PATH_BUF - 1] = '\0';
+	}
+
+	if (likely(hash_empty(hymo_paths) &&
+		   hash_empty(hymo_hide_paths) &&
+		   hash_empty(hymo_merge_dirs)))
+		return;
+
+	if (unlikely(hymofs_should_hide(buf))) {
+		new_path = hymo_userspace_stack_buffer(HYMO_HIDE_PATH, sizeof(HYMO_HIDE_PATH));
+		if (new_path) {
+			*path_reg = (unsigned long)new_path;
+		}
+		return;
+	}
+
+	if (buf[0] != '/')
+		return;
+	target = hymofs_resolve_target(buf);
+	if (!target)
+		return;
+	{
+		size_t tlen = strlen(target) + 1;
+		if (tlen > HYMO_PATH_BUF) {
+			kfree(target);
+			return; /* target too long for userspace stack buffer */
+		}
+		new_path = hymo_userspace_stack_buffer(target, tlen);
+		kfree(target);
+		if (new_path)
+			*path_reg = (unsigned long)new_path;
+	}
+}
+
+#endif /* HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE */
+
+/* Set when sys_enter tracepoint is used for path redirect (avoids getname_flags kprobe) */
+static int hymo_tracepoint_path_registered;
+
+/* getname_flags pre-handler: only modify user path and regs; return 0 to run original. */
+static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	const char __user *filename_user;
+	char *buf;
+	char *target;
 
   (void)p;
 
@@ -3084,100 +3205,142 @@ static int __init hymofs_lkm_init(void) {
   }
 
 #if HYMOFS_VFS_KPROBES
-  /* Install VFS kprobes */
-  {
-    size_t i;
-    int ret;
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+	/* Try sys_enter tracepoint for path redirect */
+	{
+		int tp_ret = register_trace_sys_enter(hymo_sys_enter_handler, NULL);
+		if (tp_ret == 0) {
+			hymo_tracepoint_path_registered = 1;
+			pr_info("hymofs: sys_enter tracepoint registered (path redirect)\n");
+		} else {
+			pr_warn("hymofs: register_trace_sys_enter failed: %d, falling back to getname_flags kprobe\n", tp_ret);
+		}
+	}
+#endif
+	/* Install VFS kprobes (skip getname_flags if tracepoint is used) */
+	{
+		size_t i;
+		int ret;
+		size_t start_idx = (hymo_tracepoint_path_registered ? 1 : 0);
 
-    for (i = 0; i < HYMOFS_VFS_HOOK_COUNT; i++) {
-      unsigned long addr = hymofs_lookup_name(hymofs_vfs_hooks[i].name);
-      if (!addr) {
-        pr_err("hymofs: symbol not found: %s\n", hymofs_vfs_hooks[i].name);
-        while (i--)
-          unregister_kprobe(&hymofs_kprobes[i]);
-        return -ENOENT;
-      }
-      hymofs_kprobes[i].addr = (kprobe_opcode_t *)addr;
-      hymofs_kprobes[i].pre_handler = hymofs_vfs_hooks[i].pre;
-      ret = register_kprobe(&hymofs_kprobes[i]);
-      if (ret) {
-        pr_err("hymofs: register_kprobe(%s) failed: %d\n",
-               hymofs_vfs_hooks[i].name, ret);
-        while (i--)
-          unregister_kprobe(&hymofs_kprobes[i]);
-        return ret;
-      }
-      pr_info("hymofs: kprobe %s @0x%lx\n", hymofs_vfs_hooks[i].name, addr);
-    }
+		for (i = start_idx; i < HYMOFS_VFS_HOOK_COUNT; i++) {
+			unsigned long addr = hymofs_lookup_name(hymofs_vfs_hooks[i].name);
+			if (!addr) {
+				pr_err("hymofs: symbol not found: %s\n", hymofs_vfs_hooks[i].name);
+				for (; i > start_idx; i--)
+					unregister_kprobe(&hymofs_kprobes[i - 1]);
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+				if (hymo_tracepoint_path_registered) {
+					unregister_trace_sys_enter(hymo_sys_enter_handler, NULL);
+					tracepoint_synchronize_unregister();
+				}
+#endif
+				return -ENOENT;
+			}
+			hymofs_kprobes[i].addr = (kprobe_opcode_t *)addr;
+			hymofs_kprobes[i].pre_handler = hymofs_vfs_hooks[i].pre;
+			ret = register_kprobe(&hymofs_kprobes[i]);
+			if (ret) {
+				pr_err("hymofs: register_kprobe(%s) failed: %d\n",
+				       hymofs_vfs_hooks[i].name, ret);
+				for (; i > start_idx; i--)
+					unregister_kprobe(&hymofs_kprobes[i - 1]);
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+				if (hymo_tracepoint_path_registered) {
+					unregister_trace_sys_enter(hymo_sys_enter_handler, NULL);
+					tracepoint_synchronize_unregister();
+				}
+#endif
+				return ret;
+			}
+			pr_info("hymofs: kprobe %s @0x%lx\n", hymofs_vfs_hooks[i].name, addr);
+		}
 
-    /* kretprobes for vfs_getattr and d_path (modify after return) */
-    hymo_krp_vfs_getattr.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_GETATTR].addr;
-    hymo_krp_vfs_getattr.entry_handler = hymo_krp_vfs_getattr_entry;
-    hymo_krp_vfs_getattr.handler = hymo_krp_vfs_getattr_ret;
-    hymo_krp_vfs_getattr.data_size = sizeof(struct hymo_getattr_ri_data);
-    hymo_krp_vfs_getattr.maxactive = 64;
-    ret = register_kretprobe(&hymo_krp_vfs_getattr);
-    if (ret) {
-      pr_err("hymofs: register_kretprobe(vfs_getattr) failed: %d\n", ret);
-      for (i = HYMOFS_VFS_HOOK_COUNT; i--;)
-        unregister_kprobe(&hymofs_kprobes[i]);
-      return ret;
-    }
-    hymo_krp_d_path.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_DPATH].addr;
-    hymo_krp_d_path.entry_handler = hymo_krp_d_path_entry;
-    hymo_krp_d_path.handler = hymo_krp_d_path_ret;
-    hymo_krp_d_path.data_size = sizeof(struct hymo_d_path_ri_data);
-    hymo_krp_d_path.maxactive = 64;
-    ret = register_kretprobe(&hymo_krp_d_path);
-    if (ret) {
-      pr_err("hymofs: register_kretprobe(d_path) failed: %d\n", ret);
-      unregister_kretprobe(&hymo_krp_vfs_getattr);
-      for (i = HYMOFS_VFS_HOOK_COUNT; i--;)
-        unregister_kprobe(&hymofs_kprobes[i]);
-      return ret;
-    }
-    hymo_krp_iterate_dir.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_ITERDIR].addr;
-    hymo_krp_iterate_dir.entry_handler = hymo_krp_iterate_dir_entry;
-    hymo_krp_iterate_dir.handler = hymo_krp_iterate_dir_ret;
-    hymo_krp_iterate_dir.data_size = sizeof(struct hymo_iterate_ri_data);
-    hymo_krp_iterate_dir.maxactive = 64;
-    ret = register_kretprobe(&hymo_krp_iterate_dir);
-    if (ret) {
-      pr_err("hymofs: register_kretprobe(iterate_dir) failed: %d\n", ret);
-      unregister_kretprobe(&hymo_krp_d_path);
-      unregister_kretprobe(&hymo_krp_vfs_getattr);
-      for (i = HYMOFS_VFS_HOOK_COUNT; i--;)
-        unregister_kprobe(&hymofs_kprobes[i]);
-      return ret;
-    }
-    pr_info("hymofs: kretprobes vfs_getattr, d_path, iterate_dir registered\n");
+		/* kretprobes for vfs_getattr and d_path (modify after return) */
+		hymo_krp_vfs_getattr.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_GETATTR].addr;
+		hymo_krp_vfs_getattr.entry_handler = hymo_krp_vfs_getattr_entry;
+		hymo_krp_vfs_getattr.handler = hymo_krp_vfs_getattr_ret;
+		hymo_krp_vfs_getattr.data_size = sizeof(struct hymo_getattr_ri_data);
+		hymo_krp_vfs_getattr.maxactive = 64;
+		ret = register_kretprobe(&hymo_krp_vfs_getattr);
+		if (ret) {
+			pr_err("hymofs: register_kretprobe(vfs_getattr) failed: %d\n", ret);
+			for (i = HYMOFS_VFS_HOOK_COUNT; i > start_idx; i--)
+				unregister_kprobe(&hymofs_kprobes[i - 1]);
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+			if (hymo_tracepoint_path_registered) {
+				unregister_trace_sys_enter(hymo_sys_enter_handler, NULL);
+				tracepoint_synchronize_unregister();
+			}
+#endif
+			return ret;
+		}
+		hymo_krp_d_path.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_DPATH].addr;
+		hymo_krp_d_path.entry_handler = hymo_krp_d_path_entry;
+		hymo_krp_d_path.handler = hymo_krp_d_path_ret;
+		hymo_krp_d_path.data_size = sizeof(struct hymo_d_path_ri_data);
+		hymo_krp_d_path.maxactive = 64;
+		ret = register_kretprobe(&hymo_krp_d_path);
+		if (ret) {
+			pr_err("hymofs: register_kretprobe(d_path) failed: %d\n", ret);
+			unregister_kretprobe(&hymo_krp_vfs_getattr);
+			for (i = HYMOFS_VFS_HOOK_COUNT; i > start_idx; i--)
+				unregister_kprobe(&hymofs_kprobes[i - 1]);
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+			if (hymo_tracepoint_path_registered) {
+				unregister_trace_sys_enter(hymo_sys_enter_handler, NULL);
+				tracepoint_synchronize_unregister();
+			}
+#endif
+			return ret;
+		}
+		hymo_krp_iterate_dir.kp.addr = hymofs_kprobes[HYMOFS_VFS_IDX_ITERDIR].addr;
+		hymo_krp_iterate_dir.entry_handler = hymo_krp_iterate_dir_entry;
+		hymo_krp_iterate_dir.handler = hymo_krp_iterate_dir_ret;
+		hymo_krp_iterate_dir.data_size = sizeof(struct hymo_iterate_ri_data);
+		hymo_krp_iterate_dir.maxactive = 64;
+		ret = register_kretprobe(&hymo_krp_iterate_dir);
+		if (ret) {
+			pr_err("hymofs: register_kretprobe(iterate_dir) failed: %d\n", ret);
+			unregister_kretprobe(&hymo_krp_d_path);
+			unregister_kretprobe(&hymo_krp_vfs_getattr);
+			for (i = HYMOFS_VFS_HOOK_COUNT; i > start_idx; i--)
+				unregister_kprobe(&hymofs_kprobes[i - 1]);
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+			if (hymo_tracepoint_path_registered) {
+				unregister_trace_sys_enter(hymo_sys_enter_handler, NULL);
+				tracepoint_synchronize_unregister();
+			}
+#endif
+			return ret;
+		}
+		pr_info("hymofs: kretprobes vfs_getattr, d_path, iterate_dir registered\n");
 
-    /* vfs_getxattr kretprobe for SELinux context spoofing (optional) */
-    {
-      unsigned long xattr_addr = hymofs_lookup_name("vfs_getxattr");
-      if (xattr_addr) {
-        hymo_vfs_getxattr_addr = (void *)xattr_addr;
-        hymo_krp_vfs_getxattr.kp.addr = (kprobe_opcode_t *)xattr_addr;
-        hymo_krp_vfs_getxattr.entry_handler = hymo_krp_vfs_getxattr_entry;
-        hymo_krp_vfs_getxattr.handler = hymo_krp_vfs_getxattr_ret;
-        hymo_krp_vfs_getxattr.data_size = sizeof(struct hymo_getxattr_ri_data);
-        hymo_krp_vfs_getxattr.maxactive = 64;
-        ret = register_kretprobe(&hymo_krp_vfs_getxattr);
-        if (ret == 0) {
-          hymo_getxattr_kprobe_registered = 1;
-          pr_info(
-              "hymofs: kretprobe vfs_getxattr registered (SELinux spoof)\n");
-        } else {
-          pr_warn("hymofs: register_kretprobe(vfs_getxattr) failed: %d\n", ret);
-        }
-      } else {
-        pr_warn("hymofs: vfs_getxattr not found, SELinux context spoofing "
-                "disabled\n");
-      }
-    }
-  }
-  pr_info("hymofs: initialized (%d VFS kprobes + 3 kretprobes + GET_FD)\n",
-          HYMOFS_VFS_HOOK_COUNT);
+		/* vfs_getxattr kretprobe for SELinux context spoofing (optional) */
+		{
+			unsigned long xattr_addr = hymofs_lookup_name("vfs_getxattr");
+			if (xattr_addr) {
+				hymo_vfs_getxattr_addr = (void *)xattr_addr;
+				hymo_krp_vfs_getxattr.kp.addr = (kprobe_opcode_t *)xattr_addr;
+				hymo_krp_vfs_getxattr.entry_handler = hymo_krp_vfs_getxattr_entry;
+				hymo_krp_vfs_getxattr.handler = hymo_krp_vfs_getxattr_ret;
+				hymo_krp_vfs_getxattr.data_size = sizeof(struct hymo_getxattr_ri_data);
+				hymo_krp_vfs_getxattr.maxactive = 64;
+				ret = register_kretprobe(&hymo_krp_vfs_getxattr);
+				if (ret == 0) {
+					hymo_getxattr_kprobe_registered = 1;
+					pr_info("hymofs: kretprobe vfs_getxattr registered (SELinux spoof)\n");
+				} else {
+					pr_warn("hymofs: register_kretprobe(vfs_getxattr) failed: %d\n", ret);
+				}
+			} else {
+				pr_warn("hymofs: vfs_getxattr not found, SELinux context spoofing disabled\n");
+			}
+		}
+	}
+	pr_info("hymofs: initialized (%d VFS kprobes + 3 kretprobes + GET_FD%s)\n",
+		(int)(HYMOFS_VFS_HOOK_COUNT - (hymo_tracepoint_path_registered ? 1 : 0)),
+		hymo_tracepoint_path_registered ? " + sys_enter tracepoint" : "");
 #else
   pr_info("hymofs: initialized (GET_FD only, VFS kprobes disabled)\n");
 #endif
@@ -3199,16 +3362,27 @@ static void __exit hymofs_lkm_exit(void) {
   unregister_kprobe(&hymo_kp_ni);
 
 #if HYMOFS_VFS_KPROBES
-  if (hymo_getxattr_kprobe_registered)
-    unregister_kretprobe(&hymo_krp_vfs_getxattr);
-  unregister_kretprobe(&hymo_krp_iterate_dir);
-  unregister_kretprobe(&hymo_krp_d_path);
-  unregister_kretprobe(&hymo_krp_vfs_getattr);
-  {
-    size_t i;
-    for (i = 0; i < HYMOFS_VFS_HOOK_COUNT; i++)
-      unregister_kprobe(&hymofs_kprobes[i]);
-  }
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+	if (hymo_tracepoint_path_registered) {
+		unregister_trace_sys_enter(hymo_sys_enter_handler, NULL);
+		tracepoint_synchronize_unregister();
+		pr_info("hymofs: sys_enter tracepoint unregistered\n");
+	}
+#endif
+	if (hymo_getxattr_kprobe_registered)
+		unregister_kretprobe(&hymo_krp_vfs_getxattr);
+	unregister_kretprobe(&hymo_krp_iterate_dir);
+	unregister_kretprobe(&hymo_krp_d_path);
+	unregister_kretprobe(&hymo_krp_vfs_getattr);
+	{
+		size_t i, start = 0;
+#if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
+		if (hymo_tracepoint_path_registered)
+			start = 1; /* getname_flags was skipped */
+#endif
+		for (i = start; i < HYMOFS_VFS_HOOK_COUNT; i++)
+			unregister_kprobe(&hymofs_kprobes[i]);
+	}
 #endif
 
   /* Clean up all rules and wait for RCU grace period */
