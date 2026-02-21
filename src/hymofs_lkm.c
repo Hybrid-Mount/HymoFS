@@ -43,6 +43,9 @@
 #include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <linux/xattr.h>
+#ifndef HYMOFS_USE_SYSCALL_TRACEPOINT
+#define HYMOFS_USE_SYSCALL_TRACEPOINT 1
+#endif
 #if HYMOFS_USE_SYSCALL_TRACEPOINT && defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS)
 #include <asm/unistd.h>
 #include <linux/sched/task_stack.h>
@@ -72,14 +75,10 @@ MODULE_VERSION(HYMOFS_VERSION);
 #endif
 
 /*
- * Use sys_enter tracepoint for path redirect instead of getname_flags kprobe.
- * Requires CONFIG_HAVE_SYSCALL_TRACEPOINTS. Falls back to getname_flags if
- * tracepoint registration fails. Build with -DHYMOFS_USE_SYSCALL_TRACEPOINT=1
- * to try.
+ * Use sys_enter tracepoint for path redirect (default). Falls back to getname_flags
+ * kprobe if tracepoint registration fails or CONFIG_HAVE_SYSCALL_TRACEPOINTS is off.
+ * Build with -DHYMOFS_USE_SYSCALL_TRACEPOINT=0 to force getname_flags kprobe.
  */
-#ifndef HYMOFS_USE_SYSCALL_TRACEPOINT
-#define HYMOFS_USE_SYSCALL_TRACEPOINT 0
-#endif
 
 /*
  * NOTE: We do NOT use MODULE_IMPORT_NS() for VFS symbols.
