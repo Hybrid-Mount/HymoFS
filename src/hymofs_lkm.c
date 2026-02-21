@@ -55,6 +55,7 @@
 #endif
 
 #include "hymofs_lkm.h"
+#include "dcache.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Anatdx");
@@ -217,6 +218,8 @@ static struct file *(*hymo_dentry_open)(const struct path *, int, const struct c
 /* Bypass d_path kprobe to avoid recursion when we need path inside iterate_dir/d_path handlers */
 static char *(*hymo_d_absolute_path)(const struct path *, char *, int);
 static char *(*hymo_dentry_path_raw)(const struct dentry *, char *, int);
+/* d_hash_and_lookup for dcache lookups in iterate_dir filldir */
+static struct dentry *(*hymo_d_hash_and_lookup)(struct dentry *, struct qstr *);
 /* vfs_getxattr addr for resolving source path's SELinux context (set when xattr kretprobe registered) */
 static void *hymo_vfs_getxattr_addr;
 
@@ -2063,7 +2066,7 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 			if (d_inode(tgt) && d_inode(tgt) == d_inode(w->parent_dentry))
 				continue;
 			{
-				struct dentry *child = d_hash_and_lookup(tgt,
+				struct dentry *child = hymo_d_hash_and_lookup(tgt,
 					&(struct qstr)QSTR_INIT(name, namlen));
 				if (child) {
 					dput(child);
@@ -2077,7 +2080,7 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 	    !hymo_is_privileged_process() && hymo_should_apply_hide_rules()) {
 		struct dentry *child;
 
-		child = d_hash_and_lookup(w->parent_dentry,
+		child = hymo_d_hash_and_lookup(w->parent_dentry,
 				&(struct qstr)QSTR_INIT(name, namlen));
 		if (child) {
 			struct inode *cinode = d_inode(child);
@@ -2988,6 +2991,22 @@ static int __init hymofs_lkm_init(void)
 	hymo_dentry_open = (void *)hymofs_lookup_name("dentry_open");
 	hymo_d_absolute_path = (void *)hymofs_lookup_name("d_absolute_path");
 	hymo_dentry_path_raw = (void *)hymofs_lookup_name("dentry_path_raw");
+	hymo_d_hash_and_lookup = (void *)hymofs_lookup_name("d_hash_and_lookup");
+	/* Use fallback implementations if kernel symbols not available */
+	if (!hymo_d_absolute_path) {
+		hymo_d_absolute_path = hymo_d_absolute_path_fallback;
+		pr_info("hymofs: using fallback d_absolute_path implementation\n");
+	}
+	if (!hymo_dentry_path_raw) {
+		hymo_dentry_path_raw = hymo_dentry_path_raw_fallback;
+		pr_info("hymofs: using fallback dentry_path_raw implementation\n");
+	}
+	if (!hymo_d_hash_and_lookup) {
+		hymo_d_hash_and_lookup = hymo_d_hash_and_lookup_fallback;
+		pr_info("hymofs: using fallback d_hash_and_lookup implementation\n");
+		/* Initialize dcache fallback with d_lookup for the fallback implementation */
+		hymo_dcache_fallback_init((void *)hymofs_lookup_name("d_lookup"));
+	}
 	hymo_strncpy_from_user_nofault = (void *)hymofs_lookup_name("strncpy_from_user_nofault");
 	if (!hymo_strncpy_from_user_nofault)
 		pr_warn("hymofs: strncpy_from_user_nofault not found, falling back to copy_from_user\n");
@@ -2995,8 +3014,6 @@ static int __init hymofs_lkm_init(void)
 		pr_warn("hymofs: filp_open/kernel_read not found, allowlist disabled\n");
 	if (!hymo_vfs_getattr || !hymo_dentry_open)
 		pr_warn("hymofs: vfs_getattr/dentry_open not found, merge whiteout/iterate disabled\n");
-	if (!hymo_d_absolute_path && !hymo_dentry_path_raw)
-		pr_warn("hymofs: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
 
 	/* Initialize hash tables */
 	hash_init(hymo_paths);

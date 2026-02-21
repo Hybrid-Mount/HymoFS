@@ -98,50 +98,6 @@ jobs:
           name: hymofs-lkm-zip
           path: dist/
 
-  post-lkm-tg:
-    name: Post LKM zip to Telegram
-    needs: merge-lkm
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo (for scripts)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: scripts
-
-      - name: Download LKM zip
-        uses: actions/download-artifact@v4
-        with:
-          name: hymofs-lkm-zip
-          path: dist
-
-      - name: Post zip to Telegram
-        env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MESSAGE_THREAD_ID: ${{ secrets.KPM_MESSAGE_THREAD_ID }}
-          SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
-          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TITLE: "HymoFS LKM (all KMI)"
-          VERSION: ${{ github.sha }}
-          BRANCH: ${{ github.ref_name }}
-        run: |
-          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-            echo "BOT_TOKEN/CHAT_ID not set, skipping."
-            exit 0
-          fi
-          pip install telethon==1.34.0
-          ZIP="dist/hymofs-lkm.zip"
-          FILES="$ZIP"
-          [ -f "dist/hymofs-lkm.zip.asc" ] && FILES="$FILES dist/hymofs-lkm.zip.asc"
-          if [ -f "$ZIP" ]; then
-            python3 scripts/hymobot.py $FILES
-          else
-            echo "No zip to upload"
-          fi
-
   trigger-hymo:
     name: Trigger hymo build-lkm
     needs: merge-lkm
