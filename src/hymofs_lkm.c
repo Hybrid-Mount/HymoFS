@@ -2460,9 +2460,8 @@ static HYMO_NOCFI int hymo_krp_vfs_getattr_entry(struct kretprobe_instance *ri,
 	}
 
 	dp = ERR_PTR(-ENOENT);
-	if (hymo_d_absolute_path)
-		dp = hymo_d_absolute_path(p, buf, sizeof(buf));
-	if (IS_ERR(dp) && hymo_dentry_path_raw)
+	dp = hymo_d_absolute_path(p, buf, sizeof(buf));
+	if (IS_ERR(dp))
 		dp = hymo_dentry_path_raw(p->dentry, buf, sizeof(buf));
 	if (IS_ERR_OR_NULL(dp) || dp[0] != '/')
 		return 0;
@@ -2590,9 +2589,7 @@ static HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 
 	/* Resolve target path for reverse lookup. dentry_path_raw gives path
 	 * relative to fs root; try full path and /data + rel for common Android layout. */
-	dp = ERR_PTR(-ENOENT);
-	if (hymo_dentry_path_raw)
-		dp = hymo_dentry_path_raw(dentry, tmp, sizeof(tmp));
+	dp = hymo_dentry_path_raw(dentry, tmp, sizeof(tmp));
 	if (IS_ERR_OR_NULL(dp) || dp[0] != '/')
 		return 0;
 
@@ -2647,9 +2644,8 @@ static HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 			if (hymo_kern_path(parent, LOOKUP_FOLLOW, &src_path) == 0) {
 				char *res = NULL;
 				bool got_ctx = false;
-				if (hymo_d_absolute_path)
-					res = hymo_d_absolute_path(&src_path, resolved, sizeof(resolved));
-				if (IS_ERR_OR_NULL(res) && hymo_dentry_path_raw)
+				res = hymo_d_absolute_path(&src_path, resolved, sizeof(resolved));
+				if (IS_ERR_OR_NULL(res))
 					res = hymo_dentry_path_raw(src_path.dentry, resolved, sizeof(resolved));
 				if (res && !IS_ERR(res) && res[0] == '/' &&
 				    parent_len < len && try_path[parent_len] == '/') {
@@ -2766,9 +2762,8 @@ static HYMO_NOCFI int hymo_krp_d_path_entry(struct kretprobe_instance *ri,
 		return 0;
 
 	dp = ERR_PTR(-ENOENT);
-	if (hymo_d_absolute_path)
-		dp = hymo_d_absolute_path(p, tmp, sizeof(tmp));
-	if (IS_ERR(dp) && hymo_dentry_path_raw)
+	dp = hymo_d_absolute_path(p, tmp, sizeof(tmp));
+	if (IS_ERR(dp))
 		dp = hymo_dentry_path_raw(p->dentry, tmp, sizeof(tmp));
 	if (IS_ERR_OR_NULL(dp) || dp[0] != '/')
 		return 0;
@@ -2892,14 +2887,13 @@ static HYMO_NOCFI int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *
 		 */
 		if (atomic_read(&hymo_rule_count) > 0 && w->dir_has_inject) {
 			char *buf = this_cpu_ptr(hymo_iterate_dir_path);
-			char *dp = ERR_PTR(-ENOENT);
+			char *dp;
 
-			if (hymo_d_absolute_path)
-				dp = hymo_d_absolute_path(&file->f_path, buf,
-							  HYMO_ITERATE_PATH_BUF);
-			if (IS_ERR(dp) && hymo_dentry_path_raw)
+			dp = hymo_d_absolute_path(&file->f_path, buf,
+						  HYMO_ITERATE_PATH_BUF);
+			if (IS_ERR(dp))
 				dp = hymo_dentry_path_raw(w->parent_dentry, buf,
-							  HYMO_ITERATE_PATH_BUF);
+						  HYMO_ITERATE_PATH_BUF);
 
 			if (!IS_ERR_OR_NULL(dp) && *dp == '/') {
 				struct hymo_inject_entry *ie;
