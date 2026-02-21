@@ -15,6 +15,10 @@ obj-m += hymofs_lkm.o
 # Override -gz=zstd when host compiler does not support it.
 ccflags-y += -gz=none
 
+# Disable syscall tracepoint (use getname_flags kprobe fallback)
+# Required for GKI kernels that don't export __tracepoint_sys_enter
+ccflags-y += -DHYMOFS_USE_SYSCALL_TRACEPOINT=0
+
 # Disable CFI for this out-of-tree module: all indirect calls to dynamically
 # resolved kernel symbols (via kallsyms/kprobe) will have mismatched CFI type
 # hashes and trigger CFI failures otherwise.
