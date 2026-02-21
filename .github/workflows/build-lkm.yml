@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all LKM artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
 
       - name: Merge into lkm folder
         run: |
@@ -42,7 +42,7 @@ jobs:
           find . -name "*.ko" -path "*hymofs_lkm*" -exec cp {} lkm/ \;
 
       - name: Upload combined LKM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: hymofs-lkm-all
           path: lkm/
