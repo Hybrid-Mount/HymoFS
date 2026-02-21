@@ -26,10 +26,9 @@
 #include "hymo_magic.h"
 
 /* Bypass CFI/kCFI for indirect calls to dynamically resolved kernel symbols.
- * Classic CFI uses "cfi"; kernel 6.2+ kCFI uses "kcfi". Older Clang (e.g. in
- * android12-5.10 DDK) does not know "kcfi" and -Werror treats unknown sanitizer
- * as error. Use 17+ for kcfi to avoid DDK/backported Clang that reports 16 but
- * lacks kcfi. */
+ * Classic CFI uses "cfi"; kernel 6.2+ kCFI uses "kcfi". Older Clang (e.g. in android12-5.10 DDK)
+ * does not know "kcfi" and -Werror treats unknown sanitizer as error. Use 17+ for kcfi to
+ * avoid DDK/backported Clang that reports 16 but lacks kcfi. */
 #if defined(__clang__)
 #if __clang_major__ >= 17
 #define HYMO_NOCFI __attribute__((no_sanitize("cfi", "kcfi")))
