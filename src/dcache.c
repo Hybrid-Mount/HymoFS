@@ -13,6 +13,7 @@
 #include <linux/dcache.h>
 #include <linux/path.h>
 #include <linux/errno.h>
+#include <linux/err.h>
 #include <linux/string.h>
 #include <linux/rcupdate.h>
 #include "dcache.h"
