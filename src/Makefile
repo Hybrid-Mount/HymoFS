@@ -19,10 +19,17 @@ ccflags-y += -gz=none
 # Required for GKI kernels that don't export __tracepoint_sys_enter
 ccflags-y += -DHYMOFS_USE_SYSCALL_TRACEPOINT=0
 
-# Disable CFI for this out-of-tree module: all indirect calls to dynamically
-# resolved kernel symbols (via kallsyms/kprobe) will have mismatched CFI type
-# hashes and trigger CFI failures otherwise.
-ccflags-y += $(call cc-option,-fno-sanitize=cfi)
+# CRITICAL: Disable ALL CFI/kCFI for this out-of-tree module.
+# GKI kernels enforce CFI, but our dynamic symbol resolution creates
+# indirect calls with mismatched CFI type hashes.
+# Must use direct flags (not cc-option) to ensure they're applied.
+ccflags-y += -fno-sanitize=cfi -fno-sanitize=kcfi
+ccflags-y += -fno-sanitize=shadow-call-stack
+ccflags-y += -fno-sanitize=memtag
+ccflags-y += -mllvm -cfi-icall-experimental=false 2>/dev/null || true
+
+# Try to disable kernel CFI checking for this module
+ccflags-y += -D__DISABLE_EXPORTS__
 
 clean:
 	rm -rf .tmp_versions

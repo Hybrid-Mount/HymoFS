@@ -211,14 +211,59 @@ static DECLARE_BITMAP(hymo_hide_bloom, HYMO_BLOOM_SIZE);
 static dev_t hymo_system_dev;
 
 /* VFS symbols resolved at init; forward-declared for use in merge/inject before init. */
-static int (*hymo_kern_path)(const char *, unsigned int, struct path *);
-static int (*hymo_vfs_getattr)(const struct path *, struct kstat *, u32, unsigned int);
-static struct file *(*hymo_dentry_open)(const struct path *, int, const struct cred *);
-/* Bypass d_path kprobe to avoid recursion when we need path inside iterate_dir/d_path handlers */
-static char *(*hymo_d_absolute_path)(const struct path *, char *, int);
-static char *(*hymo_dentry_path_raw)(const struct dentry *, char *, int);
-/* d_hash_and_lookup for dcache lookups in iterate_dir filldir */
-static struct dentry *(*hymo_d_hash_and_lookup)(struct dentry *, struct qstr *);
+static int (*hymo_kern_path_ptr)(const char *, unsigned int, struct path *);
+static int (*hymo_vfs_getattr_ptr)(const struct path *, struct kstat *, u32, unsigned int);
+static struct file *(*hymo_dentry_open_ptr)(const struct path *, int, const struct cred *);
+static char *(*hymo_d_absolute_path_ptr)(const struct path *, char *, int);
+static char *(*hymo_dentry_path_raw_ptr)(const struct dentry *, char *, int);
+static struct dentry *(*hymo_d_hash_and_lookup_ptr)(struct dentry *, struct qstr *);
+
+/* CFI-safe wrappers for dynamically resolved function pointers.
+ * These wrappers are marked with HYMO_NOCFI to bypass CFI checks
+ * when calling through function pointers.
+ */
+static HYMO_NOCFI int hymo_kern_path(const char *name, unsigned int flags, struct path *path)
+{
+	if (!hymo_kern_path_ptr)
+		return -ENOENT;
+	return hymo_kern_path_ptr(name, flags, path);
+}
+
+static HYMO_NOCFI int hymo_vfs_getattr(const struct path *path, struct kstat *stat, u32 request_mask, unsigned int query_flags)
+{
+	if (!hymo_vfs_getattr_ptr)
+		return -ENOENT;
+	return hymo_vfs_getattr_ptr(path, stat, request_mask, query_flags);
+}
+
+static HYMO_NOCFI struct file *hymo_dentry_open(const struct path *path, int flags, const struct cred *cred)
+{
+	if (!hymo_dentry_open_ptr)
+		return ERR_PTR(-ENOENT);
+	return hymo_dentry_open_ptr(path, flags, cred);
+}
+
+static HYMO_NOCFI char *hymo_d_absolute_path(const struct path *path, char *buf, int buflen)
+{
+	if (!hymo_d_absolute_path_ptr)
+		return ERR_PTR(-ENOENT);
+	return hymo_d_absolute_path_ptr(path, buf, buflen);
+}
+
+static HYMO_NOCFI char *hymo_dentry_path_raw(const struct dentry *dentry, char *buf, int buflen)
+{
+	if (!hymo_dentry_path_raw_ptr)
+		return ERR_PTR(-ENOENT);
+	return hymo_dentry_path_raw_ptr(dentry, buf, buflen);
+}
+
+static HYMO_NOCFI struct dentry *hymo_d_hash_and_lookup(struct dentry *dir, struct qstr *name)
+{
+	if (!hymo_d_hash_and_lookup_ptr)
+		return NULL;
+	return hymo_d_hash_and_lookup_ptr(dir, name);
+}
+
 /* vfs_getxattr addr for resolving source path's SELinux context (set when xattr kretprobe registered) */
 static void *hymo_vfs_getxattr_addr;
 
@@ -268,54 +313,6 @@ static void hymo_merge_entry_free_rcu(struct rcu_head *head)
 }
 
 /* ======================================================================
- * Part 6.5: Dcache Fallback Implementations
- * ======================================================================
- * Simple fallback implementations that safely return errors when kernel
- * symbols are not available. This avoids complex dentry traversal that
- * could cause crashes on some kernels.
- */
-
-static struct dentry *(*hymo_d_lookup_func)(struct dentry *, struct qstr *);
-
-/*
- * Safe fallback: just return error. The inject/merge features will be
- * disabled, but the module will still load and function for path redirect.
- */
-static char *hymo_dentry_path_raw_fallback(const struct dentry *dentry, char *buf, int buflen)
-{
-	if (!dentry || !buf || buflen < 2)
-		return ERR_PTR(-EINVAL);
-	return ERR_PTR(-ENOSYS);
-}
-
-static char *hymo_d_absolute_path_fallback(const struct path *path, char *buf, int buflen)
-{
-	if (!path || !buf || buflen < 2)
-		return ERR_PTR(-EINVAL);
-	return ERR_PTR(-ENOSYS);
-}
-
-static struct dentry *hymo_d_hash_and_lookup_fallback(struct dentry *dir, struct qstr *name)
-{
-	if (!dir || !name || !name->name)
-		return NULL;
-	if (!hymo_d_lookup_func)
-		return NULL;
-
-	if (!name->hash)
-		name->hash = full_name_hash(dir, name->name, name->len);
-
-	return hymo_d_lookup_func(dir, name);
-}
-
-static void hymo_dcache_fallback_init(void *lookup_fn)
-{
-	hymo_d_lookup_func = lookup_fn;
-	if (!hymo_d_lookup_func)
-		pr_warn("hymofs: d_lookup not found, inject/merge will be limited\n");
-}
-
-/* ======================================================================
  * Part 7: Inode Marking
  * ====================================================================== */
 
@@ -338,7 +335,7 @@ static void hymofs_mark_dir_has_inject(const char *path_str)
 {
 	struct path p;
 
-	if (!path_str || !hymo_kern_path)
+	if (!path_str || !hymo_kern_path_ptr)
 		return;
 	if (hymo_kern_path(path_str, LOOKUP_FOLLOW, &p) != 0)
 		return;
@@ -453,7 +450,7 @@ static HYMO_NOCFI HYMO_FILLDIR_RET_TYPE hymo_merge_filldir(struct dir_context *c
 		return HYMO_FILLDIR_CONTINUE;
 
 	/* Skip whiteout (char dev 0:0) */
-	if (d_type == DT_CHR && mctx->dir_path && hymo_vfs_getattr) {
+	if (d_type == DT_CHR && mctx->dir_path && hymo_vfs_getattr_ptr) {
 		char *path = kasprintf(GFP_KERNEL, "%s/%.*s", mctx->dir_path, namlen, name);
 		if (path) {
 			struct path p;
@@ -528,7 +525,7 @@ static HYMO_NOCFI void hymofs_populate_injected_list(const char *dir_path, struc
 	 * (process context), so d_path is safe to call. Our d_path kretprobe
 	 * won't interfere since this directory is not a redirect target. */
 	if (parent) {
-		if (hymo_kern_path) {
+		if (hymo_kern_path_ptr) {
 			struct path resolved;
 			if (hymo_kern_path(dir_path, LOOKUP_FOLLOW, &resolved) == 0) {
 				dpath_buf = kmalloc(PATH_MAX, GFP_KERNEL);
@@ -635,7 +632,7 @@ next_entry:
 	rcu_read_unlock();
 
 	list_for_each_entry_safe(target_node, tmp_node, &merge_targets, list) {
-		if (target_node->target && hymo_kern_path && hymo_dentry_open) {
+		if (target_node->target && hymo_kern_path_ptr && hymo_dentry_open_ptr) {
 			struct path path;
 			if (hymo_kern_path(target_node->target, LOOKUP_FOLLOW, &path) == 0) {
 				const struct cred *cred = get_task_cred(&init_task);
@@ -774,7 +771,7 @@ static HYMO_NOCFI void hymofs_materialize_merge(const char *src_prefix,
 	struct file *f;
 	struct hymo_mat_ctx mctx;
 
-	if (!hymo_kern_path || !hymo_dentry_open || depth > 8)
+	if (!hymo_kern_path_ptr || !hymo_dentry_open_ptr || depth > 8)
 		return;
 	if (hymo_kern_path(target_dir, LOOKUP_FOLLOW, &path) != 0)
 		return;
@@ -2615,7 +2612,7 @@ static HYMO_NOCFI int hymo_krp_vfs_getxattr_entry(struct kretprobe_instance *ri,
 	 * directories. Use d_absolute_path on resolved parent to get symlink-resolved
 	 * path (e.g. /system/product -> /product), then try resolved+remainder. */
 	atomic_long_set(&hymo_xattr_source_tgid, (long)task_tgid_vnr(current));
-	if (hymo_kern_path) {
+	if (hymo_kern_path_ptr) {
 		char parent[256];
 		char resolved[256];
 		char alt[512];
@@ -3011,8 +3008,8 @@ static int __init hymofs_lkm_init(void)
 	 * behind namespaces or don't export them at all.
 	 * Critical symbols fail the module load; optional ones just warn.
 	 */
-	hymo_kern_path = (void *)hymofs_lookup_name("kern_path");
-	if (!hymo_kern_path) {
+	hymo_kern_path_ptr = (void *)hymofs_lookup_name("kern_path");
+	if (!hymo_kern_path_ptr) {
 		pr_err("hymofs: FATAL - kern_path not found\n");
 		return -ENOENT;
 	}
@@ -3034,32 +3031,19 @@ static int __init hymofs_lkm_init(void)
 	hymo_filp_open = (void *)hymofs_lookup_name("filp_open");
 	hymo_filp_close = (void *)hymofs_lookup_name("filp_close");
 	hymo_kernel_read = (void *)hymofs_lookup_name("kernel_read");
-	hymo_vfs_getattr = (void *)hymofs_lookup_name("vfs_getattr");
-	hymo_dentry_open = (void *)hymofs_lookup_name("dentry_open");
-	hymo_d_absolute_path = (void *)hymofs_lookup_name("d_absolute_path");
-	hymo_dentry_path_raw = (void *)hymofs_lookup_name("dentry_path_raw");
-	hymo_d_hash_and_lookup = (void *)hymofs_lookup_name("d_hash_and_lookup");
-	/* Use fallback implementations if kernel symbols not available */
-	if (!hymo_d_absolute_path) {
-		hymo_d_absolute_path = hymo_d_absolute_path_fallback;
-		pr_info("hymofs: using fallback d_absolute_path implementation\n");
-	}
-	if (!hymo_dentry_path_raw) {
-		hymo_dentry_path_raw = hymo_dentry_path_raw_fallback;
-		pr_info("hymofs: using fallback dentry_path_raw implementation\n");
-	}
-	if (!hymo_d_hash_and_lookup) {
-		hymo_d_hash_and_lookup = hymo_d_hash_and_lookup_fallback;
-		pr_info("hymofs: using fallback d_hash_and_lookup implementation\n");
-		/* Initialize dcache fallback with d_lookup for the fallback implementation */
-		hymo_dcache_fallback_init((void *)hymofs_lookup_name("d_lookup"));
-	}
+	hymo_vfs_getattr_ptr = (void *)hymofs_lookup_name("vfs_getattr");
+	hymo_dentry_open_ptr = (void *)hymofs_lookup_name("dentry_open");
+	hymo_d_absolute_path_ptr = (void *)hymofs_lookup_name("d_absolute_path");
+	hymo_dentry_path_raw_ptr = (void *)hymofs_lookup_name("dentry_path_raw");
+	hymo_d_hash_and_lookup_ptr = (void *)hymofs_lookup_name("d_hash_and_lookup");
+	if (!hymo_d_absolute_path_ptr && !hymo_dentry_path_raw_ptr)
+		pr_warn("hymofs: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
 	hymo_strncpy_from_user_nofault = (void *)hymofs_lookup_name("strncpy_from_user_nofault");
 	if (!hymo_strncpy_from_user_nofault)
 		pr_warn("hymofs: strncpy_from_user_nofault not found, falling back to copy_from_user\n");
 	if (!hymo_filp_open || !hymo_kernel_read)
 		pr_warn("hymofs: filp_open/kernel_read not found, allowlist disabled\n");
-	if (!hymo_vfs_getattr || !hymo_dentry_open)
+	if (!hymo_vfs_getattr_ptr || !hymo_dentry_open_ptr)
 		pr_warn("hymofs: vfs_getattr/dentry_open not found, merge whiteout/iterate disabled\n");
 
 	/* Initialize hash tables */
@@ -3074,7 +3058,7 @@ static int __init hymofs_lkm_init(void)
 	hymofs_resolve_kallsyms_lookup();
 
 	/* Resolve /system device number for stat spoofing */
-	if (hymo_kern_path) {
+	if (hymo_kern_path_ptr) {
 		struct path sys_path;
 		if (hymo_kern_path("/system", LOOKUP_FOLLOW, &sys_path) == 0) {
 			hymo_system_dev = sys_path.dentry->d_sb->s_dev;
