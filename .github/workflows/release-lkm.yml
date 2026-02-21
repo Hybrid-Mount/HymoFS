@@ -1,12 +1,7 @@
-name: Build LKM for HymoFS
+name: Release LKM for HymoFS
 
 on:
-  workflow_call:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - feat/**
 
 jobs:
   build-lkm:
@@ -55,21 +50,38 @@ jobs:
           name: ${{ matrix.kmi }}-lkm
           path: /github/workspace/out/${{ matrix.kmi }}_hymofs_lkm.ko
 
-  merge-lkm:
-    name: Merge all LKM artifacts
+  release-lkm:
+    name: Release all LKM artifacts
     needs: build-lkm
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set Release Tag
+        run: |
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          echo "RELEASE_TAG=v${COMMIT_COUNT}" >> $GITHUB_ENV
+
       - name: Download all LKM artifacts
         uses: actions/download-artifact@v7
 
-      - name: Merge into lkm folder
+      - name: Prepare Release Files
         run: |
           mkdir -p lkm
           find . -name "*.ko" -exec cp {} lkm/ \;
+          cd lkm
+          zip -j ../hymofs-lkm-all.zip *.ko
 
-      - name: Upload combined LKM artifact
-        uses: actions/upload-artifact@v6
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v2
         with:
-          name: hymofs-lkm-all
-          path: lkm/
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Release ${{ env.RELEASE_TAG }}
+          files: |
+            hymofs-lkm-all.zip
+            lkm/*.ko

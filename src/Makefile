@@ -12,7 +12,6 @@
 
 obj-m += hymofs_lkm.o
 
-# Override -gz=zstd when host compiler does not support it.
 ccflags-y += -gz=none
 
 # Disable syscall tracepoint (use getname_flags kprobe fallback)
@@ -26,7 +25,8 @@ ccflags-$(call cc-option,-fno-sanitize=cfi) += -fno-sanitize=cfi
 ccflags-$(call cc-option,-fno-sanitize=kcfi) += -fno-sanitize=kcfi
 
 clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
 	rm -rf .tmp_versions
-	@# Delete all files in this dir except source, Makefile, .md, .gitignore
 	@find . -maxdepth 1 -type f ! -name '*.c' ! -name '*.h' ! -name 'Makefile' ! -name '*.md' ! -name '.gitignore' -exec rm -f {} + 2>/dev/null || true
-.PHONY: clean
+
+.PHONY: all clean
