@@ -10,8 +10,7 @@
 #   make ... ccflags-y="-DHYMOFS_USE_SYSCALL_TRACEPOINT=0"
 #
 
-obj-m += hymofs_lkm
-hymofs_lkm-objs := hymofs_lkm.o dcache.o
+obj-m += hymofs_lkm.o
 
 # Override -gz=zstd when host compiler does not support it.
 ccflags-y += -gz=none
