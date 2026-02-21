@@ -1,0 +1,61 @@
+name: Release LKM for HymoFS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-lkm:
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    uses: Ylarod/ddk/.github/workflows/ddk-lkm.yml@main
+    secrets: inherit
+    with:
+      kmi: ${{ matrix.kmi }}
+      ddk_release: "20251104"
+      module_name: "hymofs_lkm"
+      module_path: "src"
+
+  release-lkm:
+    name: Release all LKM artifacts
+    needs: build-lkm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Release Tag
+        run: |
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          echo "RELEASE_TAG=v${COMMIT_COUNT}" >> $GITHUB_ENV
+
+      - name: Download all LKM artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Prepare Release Files
+        run: |
+          mkdir -p lkm
+          find . -name "*.ko" -path "*hymofs_lkm*" -exec cp {} lkm/ \;
+          cd lkm
+          zip -j ../hymofs-lkm-all.zip *.ko
+
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Release ${{ env.RELEASE_TAG }}
+          files: |
+            hymofs-lkm-all.zip
+            lkm/*.ko
