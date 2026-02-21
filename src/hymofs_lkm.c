@@ -264,6 +264,66 @@ static HYMO_NOCFI struct dentry *hymo_d_hash_and_lookup(struct dentry *dir, stru
 	return hymo_d_hash_and_lookup_ptr(dir, name);
 }
 
+/* Additional VFS symbols resolved at init for ioctl/allowlist path resolution */
+static struct file *(*hymo_filp_open_ptr)(const char *, int, umode_t);
+static int (*hymo_filp_close_ptr)(struct file *, fl_owner_t);
+static ssize_t (*hymo_kernel_read_ptr)(struct file *, void *, size_t, loff_t *);
+static char *(*hymo_strndup_user_ptr)(const char __user *, long);
+static struct filename *(*hymo_getname_kernel_ptr)(const char *);
+static void (*hymo_ihold_ptr)(struct inode *);
+
+/* CFI-safe wrappers for additional VFS symbols */
+static HYMO_NOCFI struct file *hymo_filp_open(const char *filename, int flags, umode_t mode)
+{
+	if (!hymo_filp_open_ptr)
+		return ERR_PTR(-ENOENT);
+	return hymo_filp_open_ptr(filename, flags, mode);
+}
+
+static HYMO_NOCFI int hymo_filp_close(struct file *filp, fl_owner_t id)
+{
+	if (!hymo_filp_close_ptr)
+		return -ENOENT;
+	return hymo_filp_close_ptr(filp, id);
+}
+
+static HYMO_NOCFI ssize_t hymo_kernel_read(struct file *file, void *buf, size_t count, loff_t *pos)
+{
+	if (!hymo_kernel_read_ptr)
+		return -EINVAL;
+	return hymo_kernel_read_ptr(file, buf, count, pos);
+}
+
+static HYMO_NOCFI char *hymo_strndup_user(const char __user *s, long n)
+{
+	if (!hymo_strndup_user_ptr)
+		return ERR_PTR(-ENOENT);
+	return hymo_strndup_user_ptr(s, n);
+}
+
+static HYMO_NOCFI struct filename *hymo_getname_kernel(const char *filename)
+{
+	if (!hymo_getname_kernel_ptr)
+		return ERR_PTR(-ENOENT);
+	return hymo_getname_kernel_ptr(filename);
+}
+
+static HYMO_NOCFI void hymo_ihold(struct inode *inode)
+{
+	if (hymo_ihold_ptr)
+		hymo_ihold_ptr(inode);
+}
+
+/* User access function resolved dynamically */
+static long (*hymo_strncpy_from_user_nofault_ptr)(char *dst, const void __user *src, long count);
+
+static HYMO_NOCFI long hymo_strncpy_from_user_nofault(char *dst, const void __user *src, long count)
+{
+	if (!hymo_strncpy_from_user_nofault_ptr)
+		return -EFAULT;
+	return hymo_strncpy_from_user_nofault_ptr(dst, src, count);
+}
+
 /* vfs_getxattr addr for resolving source path's SELinux context (set when xattr kretprobe registered) */
 static void *hymo_vfs_getxattr_addr;
 
@@ -849,14 +909,8 @@ static void hymo_add_allow_uid(uid_t uid)
  * GKI kernels protect many VFS symbols behind namespaces or don't export
  * them at all. We resolve ALL problematic VFS symbols via kprobe at init
  * time, so the module has zero direct VFS symbol dependencies.
+ * CFI-safe wrappers are defined earlier in the file.
  */
-static struct file *(*hymo_filp_open)(const char *, int, umode_t);
-static int (*hymo_filp_close)(struct file *, fl_owner_t);
-static ssize_t (*hymo_kernel_read)(struct file *, void *, size_t, loff_t *);
-/* hymo_kern_path, hymo_vfs_getattr, hymo_dentry_open declared above (merge/inject) */
-static char *(*hymo_strndup_user)(const char __user *, long);
-static struct filename *(*hymo_getname_kernel)(const char *);
-static void (*hymo_ihold)(struct inode *);
 
 static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 {
@@ -868,7 +922,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	int count = 0;
 
 	/* VFS symbols not available on this kernel - skip allowlist */
-	if (!hymo_filp_open || !hymo_kernel_read)
+	if (!hymo_filp_open_ptr || !hymo_kernel_read_ptr)
 		return false;
 
 	if (!mutex_trylock(&hymo_allowlist_lock))
@@ -904,7 +958,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 		}
 	}
 
-	if (hymo_filp_close)
+	if (hymo_filp_close_ptr)
 		hymo_filp_close(fp, NULL);
 	else
 		fput(fp);
@@ -912,7 +966,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	return true;
 
 bad:
-	if (hymo_filp_close)
+	if (hymo_filp_close_ptr)
 		hymo_filp_close(fp, NULL);
 	else
 		fput(fp);
@@ -2206,8 +2260,8 @@ passthrough:
  * Atomic-safe user access for kprobe pre-handler (cannot sleep).
  * copy_from_user/copy_to_user may sleep on page fault -> use nofault variants.
  * Resolved dynamically via kallsyms (not exported on GKI).
+ * CFI-safe wrapper defined earlier in the file.
  */
-static long (*hymo_strncpy_from_user_nofault)(char *dst, const void __user *src, long count);
 
 #if HYMOFS_USE_SYSCALL_TRACEPOINT && HYMOFS_TP_AVAILABLE
 /* Path for hide: non-existent so syscall fails with ENOENT */
@@ -2266,7 +2320,7 @@ static HYMO_NOCFI void hymo_sys_enter_handler(void *data, struct pt_regs *regs, 
 		return;
 
 	buf = this_cpu_ptr(hymo_getname_path_buf);
-	if (hymo_strncpy_from_user_nofault) {
+	if (hymo_strncpy_from_user_nofault_ptr) {
 		long ret = hymo_strncpy_from_user_nofault(buf, filename_user, HYMO_PATH_BUF - 1);
 		if (ret < 0)
 			return;
@@ -2335,7 +2389,7 @@ static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs
 		return 0;
 
 	buf = this_cpu_ptr(hymo_getname_path_buf);
-	if (hymo_strncpy_from_user_nofault) {
+	if (hymo_strncpy_from_user_nofault_ptr) {
 		long ret = hymo_strncpy_from_user_nofault(buf, filename_user, HYMO_PATH_BUF - 1);
 		if (ret < 0)
 			return 0;
@@ -2373,7 +2427,7 @@ static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs
 	target = hymofs_resolve_target(buf);
 	if (!target)
 		return 0;
-	if (hymo_getname_kernel) {
+	{
 		struct filename *fname;
 
 		this_cpu_write(hymo_kprobe_reent, 1);
@@ -2387,8 +2441,6 @@ static HYMO_NOCFI int hymo_kp_getname_flags_pre(struct kprobe *p, struct pt_regs
 		HYMO_POP_STACK(regs);
 		return 1;
 	}
-	kfree(target);
-	return 0;
 }
 
 /* vfs_getattr kprobe pre: nop (stat spoofing is done in kretprobe entry/ret). */
@@ -3007,24 +3059,24 @@ static int __init hymofs_lkm_init(void)
 		pr_err("hymofs: FATAL - kern_path not found\n");
 		return -ENOENT;
 	}
-	hymo_strndup_user = (void *)hymofs_lookup_name("strndup_user");
-	if (!hymo_strndup_user) {
+	hymo_strndup_user_ptr = (void *)hymofs_lookup_name("strndup_user");
+	if (!hymo_strndup_user_ptr) {
 		pr_err("hymofs: FATAL - strndup_user not found\n");
 		return -ENOENT;
 	}
-	hymo_ihold = (void *)hymofs_lookup_name("ihold");
-	if (!hymo_ihold) {
+	hymo_ihold_ptr = (void *)hymofs_lookup_name("ihold");
+	if (!hymo_ihold_ptr) {
 		pr_err("hymofs: FATAL - ihold not found\n");
 		return -ENOENT;
 	}
-	hymo_getname_kernel = (void *)hymofs_lookup_name("getname_kernel");
-	if (!hymo_getname_kernel)
+	hymo_getname_kernel_ptr = (void *)hymofs_lookup_name("getname_kernel");
+	if (!hymo_getname_kernel_ptr)
 		pr_warn("hymofs: getname_kernel not found, path redirect may fail\n");
 
 	/* Optional: allowlist support */
-	hymo_filp_open = (void *)hymofs_lookup_name("filp_open");
-	hymo_filp_close = (void *)hymofs_lookup_name("filp_close");
-	hymo_kernel_read = (void *)hymofs_lookup_name("kernel_read");
+	hymo_filp_open_ptr = (void *)hymofs_lookup_name("filp_open");
+	hymo_filp_close_ptr = (void *)hymofs_lookup_name("filp_close");
+	hymo_kernel_read_ptr = (void *)hymofs_lookup_name("kernel_read");
 	hymo_vfs_getattr_ptr = (void *)hymofs_lookup_name("vfs_getattr");
 	hymo_dentry_open_ptr = (void *)hymofs_lookup_name("dentry_open");
 	hymo_d_absolute_path_ptr = (void *)hymofs_lookup_name("d_absolute_path");
@@ -3032,10 +3084,10 @@ static int __init hymofs_lkm_init(void)
 	hymo_d_hash_and_lookup_ptr = (void *)hymofs_lookup_name("d_hash_and_lookup");
 	if (!hymo_d_absolute_path_ptr && !hymo_dentry_path_raw_ptr)
 		pr_warn("hymofs: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
-	hymo_strncpy_from_user_nofault = (void *)hymofs_lookup_name("strncpy_from_user_nofault");
-	if (!hymo_strncpy_from_user_nofault)
+	hymo_strncpy_from_user_nofault_ptr = (void *)hymofs_lookup_name("strncpy_from_user_nofault");
+	if (!hymo_strncpy_from_user_nofault_ptr)
 		pr_warn("hymofs: strncpy_from_user_nofault not found, falling back to copy_from_user\n");
-	if (!hymo_filp_open || !hymo_kernel_read)
+	if (!hymo_filp_open_ptr || !hymo_kernel_read_ptr)
 		pr_warn("hymofs: filp_open/kernel_read not found, allowlist disabled\n");
 	if (!hymo_vfs_getattr_ptr || !hymo_dentry_open_ptr)
 		pr_warn("hymofs: vfs_getattr/dentry_open not found, merge whiteout/iterate disabled\n");
