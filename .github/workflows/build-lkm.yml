@@ -51,8 +51,9 @@ jobs:
       - name: Upload hymofs_lkm.ko artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.kmi }}-lkm
+          name: ${{ matrix.kmi }}_hymofs_lkm.ko
           path: /github/workspace/out/${{ matrix.kmi }}_hymofs_lkm.ko
+          compression-level: 0
 
   merge-lkm:
     name: Merge all LKM artifacts
@@ -61,14 +62,14 @@ jobs:
     steps:
       - name: Download all LKM artifacts
         uses: actions/download-artifact@v7
-
-      - name: Merge into lkm folder
-        run: |
-          mkdir -p lkm
-          find . -name "*.ko" -exec cp {} lkm/ \;
+        with:
+          pattern: '*_hymofs_lkm.ko'
+          path: lkm
+          merge-multiple: true
 
       - name: Upload combined LKM artifact
         uses: actions/upload-artifact@v6
         with:
           name: hymofs-lkm-all
           path: lkm/
+          compression-level: 0

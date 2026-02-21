@@ -47,8 +47,9 @@ jobs:
       - name: Upload hymofs_lkm.ko artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.kmi }}-lkm
+          name: ${{ matrix.kmi }}_hymofs_lkm.ko
           path: /github/workspace/out/${{ matrix.kmi }}_hymofs_lkm.ko
+          compression-level: 0
 
   release-lkm:
     name: Release all LKM artifacts
@@ -69,19 +70,14 @@ jobs:
 
       - name: Download all LKM artifacts
         uses: actions/download-artifact@v7
-
-      - name: Prepare Release Files
-        run: |
-          mkdir -p lkm
-          find . -name "*.ko" -exec cp {} lkm/ \;
-          cd lkm
-          zip -j ../hymofs-lkm-all.zip *.ko
+        with:
+          pattern: '*_hymofs_lkm.ko'
+          path: lkm
+          merge-multiple: true
 
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Release ${{ env.RELEASE_TAG }}
-          files: |
-            hymofs-lkm-all.zip
-            lkm/*.ko
+          files: lkm/*.ko
