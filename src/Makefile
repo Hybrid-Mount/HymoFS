@@ -11,7 +11,7 @@
 #
 
 obj-m += hymofs_lkm.o
-hymofs_lkm-objs := hymofs_lkm.o dcache.o
+hymofs_lkm-y := dcache.o
 
 # Override -gz=zstd when host compiler does not support it.
 ccflags-y += -gz=none
