@@ -2,6 +2,9 @@ obj-m += hymofs_lkm.o
 
 ccflags-y += -gz=none
 ccflags-y += $(call cc-option,-fno-sanitize=cfi)
+ccflags-y += -DHYMOFS_USE_SYSCALL_TRACEPOINT=0
+ccflags-$(call cc-option,-fno-sanitize=cfi) += -fno-sanitize=cfi
+ccflags-$(call cc-option,-fno-sanitize=kcfi) += -fno-sanitize=kcfi
 ccflags-y += -Wno-unknown-sanitizers
 
 all:
