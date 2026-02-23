@@ -229,10 +229,7 @@ DECLARE_PER_CPU(int, hymo_iterate_did_swap);
  * Logging
  * ====================================================================== */
 
-#define hymo_log(fmt, ...) do { \
-	if (hymo_debug_enabled) \
-		pr_info("hymofs: " fmt, ##__VA_ARGS__); \
-} while (0)
+#define hymo_log(fmt, ...) (void)(hymo_debug_enabled && pr_info("[HymoFS] " fmt, ##__VA_ARGS__))
 
 /* debug flag - defined in hymofs_lkm.c */
 extern bool hymo_debug_enabled;

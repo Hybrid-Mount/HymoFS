@@ -619,6 +619,16 @@ next_entry:
 
 	list_for_each_entry_safe(target_node, tmp_node, &merge_targets, list) {
 		if (target_node->target && hymo_kern_path && hymo_dentry_open) {
+			char *replace_path = kasprintf(GFP_KERNEL, "%s/.replace", target_node->target);
+			if (replace_path) {
+				struct path rp;
+				if (hymo_kern_path(replace_path, LOOKUP_FOLLOW, &rp) == 0) {
+					hymo_log("replace mode enabled for %s (found %s)\n", dir_path, replace_path);
+					path_put(&rp);
+				}
+				kfree(replace_path);
+			}
+			{
 			struct path path;
 			if (hymo_kern_path(target_node->target, LOOKUP_FOLLOW, &path) == 0) {
 				const struct cred *cred = get_task_cred(&init_task);
@@ -637,6 +647,7 @@ next_entry:
 				}
 				put_cred(cred);
 				path_put(&path);
+			}
 			}
 		}
 		kfree(target_node->target);
@@ -877,6 +888,7 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	if (ret != sizeof(version))
 		goto bad;
 
+	hymo_log("allowlist version %u\n", version);
 	spin_lock(&hymo_allow_uids_lock);
 	xa_destroy(&hymo_allow_uids_xa);
 	hymo_allowlist_loaded = true;
@@ -885,8 +897,10 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	while (hymo_kernel_read(fp, &profile, sizeof(profile), &off) == sizeof(profile)) {
 		if (!hymo_should_umount_profile(&profile) && profile.current_uid > 0) {
 			hymo_add_allow_uid((uid_t)profile.current_uid);
-			if (++count >= HYMO_ALLOWLIST_UID_MAX)
+			if (++count >= HYMO_ALLOWLIST_UID_MAX) {
+				hymo_log("allowlist truncated at %d\n", count);
 				break;
+			}
 		}
 	}
 
@@ -1114,6 +1128,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		if (copy_from_user(&val, arg, sizeof(val)))
 			return -EFAULT;
 		hymo_debug_enabled = !!val;
+		hymo_log("debug mode %s\n", hymo_debug_enabled ? "enabled" : "disabled");
 		return 0;
 	}
 
@@ -1122,6 +1137,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		if (copy_from_user(&val, arg, sizeof(val)))
 			return -EFAULT;
 		hymo_stealth_enabled = !!val;
+		hymo_log("stealth mode %s\n", hymo_stealth_enabled ? "enabled" : "disabled");
 		return 0;
 	}
 
@@ -1132,6 +1148,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		spin_lock(&hymo_cfg_lock);
 		hymofs_enabled = !!val;
 		spin_unlock(&hymo_cfg_lock);
+		hymo_log("HymoFS %s\n", hymofs_enabled ? "enabled" : "disabled");
 		if (hymofs_enabled)
 			hymo_reload_ksu_allowlist();
 		return 0;
@@ -1244,6 +1261,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		hymo_current_mirror_name = hymo_mirror_name_buf;
 		spin_unlock(&hymo_cfg_lock);
 
+		hymo_log("setting mirror path to: %s\n", hymo_mirror_path_buf);
 		kfree(new_path);
 		kfree(new_name);
 		return 0;
@@ -1278,6 +1296,8 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		strscpy(hymo_spoof_cmdline, c->cmdline, sizeof(hymo_spoof_cmdline));
 		hymo_cmdline_spoof_active = (c->cmdline[0] != '\0');
 		spin_unlock(&hymo_cmdline_lock);
+		if (hymo_cmdline_spoof_active)
+			hymo_log("cmdline: spoofed\n");
 		kfree(c);
 		return 0;
 	}
@@ -1461,6 +1481,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			spin_unlock(&hymo_inject_lock);
 			spin_unlock(&hymo_merge_lock);
 			if (!found && !ret) {
+				hymo_log("add merge rule: src=%s, target=%s\n", me->src, me->target);
 				hymofs_add_inject_rule(kstrdup(me->src, GFP_KERNEL));
 				if (me->resolved_src)
 					hymofs_add_inject_rule(kstrdup(me->resolved_src, GFP_KERNEL));
@@ -1601,6 +1622,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 					set_bit(h1, hymo_path_bloom);
 					set_bit(h2, hymo_path_bloom);
 					atomic_inc(&hymo_rule_count);
+					hymo_log("add rule: src=%s, target=%s, type=%d\n", src, target, req.type);
 				} else {
 					kfree(entry->src);
 					kfree(entry->target);
@@ -1700,6 +1722,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 					atomic_inc(&hymo_hide_count);
 					hlist_add_head_rcu(&hide_entry->node,
 						&hymo_hide_paths[hash_min(hash, HYMO_HASH_BITS)]);
+					hymo_log("hide rule: src=%s\n", src);
 				} else {
 					kfree(hide_entry);
 				}
@@ -1738,6 +1761,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 					hlist_add_head_rcu(&sb_entry->node,
 						&hymo_xattr_sbs[hash_min((unsigned long)sb,
 							HYMO_HASH_BITS)]);
+					hymo_log("hide xattrs for sb %p (path: %s)\n", sb, src);
 				}
 			}
 			spin_unlock(&hymo_xattr_sbs_lock);
@@ -1764,6 +1788,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 				hlist_del_rcu(&entry->node);
 				hlist_del_rcu(&entry->target_node);
 				atomic_dec(&hymo_rule_count);
+				hymo_log("del rule: src=%s\n", src);
 				call_rcu(&entry->rcu, hymo_entry_free_rcu);
 				goto del_done;
 			}
@@ -1774,6 +1799,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			    strcmp(hide_entry->path, src) == 0) {
 				hlist_del_rcu(&hide_entry->node);
 				atomic_dec(&hymo_hide_count);
+				hymo_log("del rule: src=%s\n", src);
 				call_rcu(&hide_entry->rcu, hymo_hide_entry_free_rcu);
 				goto del_done;
 			}
@@ -1783,6 +1809,7 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			if (strcmp(inject_entry->dir, src) == 0) {
 				hlist_del_rcu(&inject_entry->node);
 				atomic_dec(&hymo_rule_count);
+				hymo_log("del rule: src=%s\n", src);
 				call_rcu(&inject_entry->rcu, hymo_inject_entry_free_rcu);
 				goto del_done;
 			}
@@ -1868,6 +1895,7 @@ int hymofs_get_anon_fd(void)
 	spin_lock(&hymo_daemon_lock);
 	hymo_daemon_pid = pid;
 	spin_unlock(&hymo_daemon_lock);
+	hymo_log("Daemon PID auto-registered: %d\n", pid);
 	return fd;
 }
 EXPORT_SYMBOL_GPL(hymofs_get_anon_fd);
@@ -2888,6 +2916,8 @@ int hymo_krp_vfs_getattr_ret(struct kretprobe_instance *ri,
 	if (S_ISREG(stat->mode))
 		stat->nlink = 1;
 
+	hymo_log("kstat: spoofed ino %lu\n", (unsigned long)stat->ino);
+
 	/* Mark inode so xattr and future stat calls use fast O(1) check */
 	if (d->mapping)
 		set_bit(AS_FLAGS_HYMO_SPOOF_KSTAT, &d->mapping->flags);
@@ -3476,8 +3506,10 @@ static int __init hymofs_lkm_init(void)
 
 	pr_alert("hymofs: STAGE 5: registering tracepoints\n");
 	/* Try tracepoint for path redirect + GET_FD first. Tracepoint supports multiple listeners (KSU + HymoFS can coexist). */
-	if (!hymo_no_tracepoint_param)
+	if (!hymo_skip_getfd_param && !hymo_no_tracepoint_param)
 		(void)hymofs_tracepoint_path_init();
+	else if (hymo_skip_getfd_param)
+		pr_alert("hymofs: skipping tracepoint (hymo_skip_getfd=1)\n");
 
 	pr_alert("hymofs: STAGE 6: registering GET_FD kprobes\n");
 	/* GET_FD: use tracepoint if available, else kprobe */
@@ -3486,7 +3518,8 @@ static int __init hymofs_lkm_init(void)
 		return -EINVAL;
 	}
 
-	if (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered()) {
+	if (!hymo_skip_getfd_param &&
+	    (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered())) {
 		const char *ni_names[] = { "__arm64_sys_ni_syscall", "sys_ni_syscall", "__x64_sys_ni_syscall", NULL };
 		unsigned long ni_addr = 0;
 		int i, ret;
@@ -3514,9 +3547,11 @@ static int __init hymofs_lkm_init(void)
 		}
 		hymo_ni_kprobe_registered = 1;
 		pr_info("hymofs: GET_FD via kprobe on ni_syscall (nr=%d)\n", hymo_syscall_nr_param);
+	} else if (hymo_skip_getfd_param) {
+		pr_alert("hymofs: skipping GET_FD kprobes (hymo_skip_getfd=1)\n");
 	}
 
-	if (!hymofs_tracepoint_path_registered()) {
+	if (!hymo_skip_extra_kprobes_param && !hymofs_tracepoint_path_registered()) {
 		static const char *reboot_symbols[] = {
 #if defined(__aarch64__)
 			"__arm64_sys_reboot", "sys_reboot", NULL
@@ -3549,7 +3584,7 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
-	if (!hymofs_tracepoint_path_registered()) {
+	if (!hymo_skip_extra_kprobes_param && !hymofs_tracepoint_path_registered()) {
 		static const char *prctl_symbols[] = {
 #if defined(__aarch64__)
 			"__arm64_sys_prctl", "sys_prctl", NULL
@@ -3573,10 +3608,12 @@ static int __init hymofs_lkm_init(void)
 			if (ret == 0)
 				hymo_prctl_kprobe_registered = 1;
 		}
+	} else if (hymo_skip_extra_kprobes_param) {
+		pr_alert("hymofs: skipping extra kprobes (reboot,prctl,uname,cmdline)\n");
 	}
 
 	/* uname spoofing: kretprobe on newuname syscall */
-	{
+	if (!hymo_skip_extra_kprobes_param) {
 		static const char *uname_symbols[] = {
 #if defined(__aarch64__)
 			"__arm64_sys_newuname", "sys_newuname", NULL
@@ -3605,7 +3642,7 @@ static int __init hymofs_lkm_init(void)
 	}
 
 	/* cmdline spoofing: tracepoint when available, else kretprobe on read, else kprobe on cmdline_proc_show */
-	{
+	if (!hymo_skip_extra_kprobes_param) {
 		int ret;
 		if (!hymofs_tracepoint_path_registered() || !hymofs_tracepoint_getfd_registered()) {
 			const char *read_sym =
@@ -3648,6 +3685,7 @@ static int __init hymofs_lkm_init(void)
 
 	pr_alert("hymofs: STAGE 7: registering VFS hooks\n");
 #if HYMOFS_VFS_KPROBES
+	if (!hymo_skip_vfs_param) {
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
 	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */
 	{
@@ -3838,6 +3876,12 @@ static int __init hymofs_lkm_init(void)
 		hymo_vfs_use_ftrace ? "ftrace" : "kprobes",
 		hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered() ?
 			"sys_enter/sys_exit tracepoint" : "kprobes");
+	} else {
+		pr_alert("hymofs: skipping VFS hooks (hymo_skip_vfs=1)\n");
+		pr_info("hymofs: initialized (VFS hooks skipped, GET_FD via %s)\n",
+			hymofs_tracepoint_path_registered() && hymofs_tracepoint_getfd_registered() ?
+				"sys_enter/sys_exit tracepoint" : "kprobes");
+	}
 #else
 	pr_info("hymofs: initialized (GET_FD only, VFS kprobes disabled)\n");
 #endif
@@ -3867,6 +3911,7 @@ static void __exit hymofs_lkm_exit(void)
 
 #if HYMOFS_VFS_KPROBES
 	hymofs_tracepoint_path_exit();
+	if (!hymo_skip_vfs_param) {
 #ifdef CONFIG_DYNAMIC_FTRACE
 	if (hymo_vfs_use_ftrace) {
 		hymofs_ftrace_unregister();
@@ -3890,6 +3935,7 @@ static void __exit hymofs_lkm_exit(void)
 			for (i = start; i < HYMOFS_VFS_HOOK_COUNT; i++)
 				unregister_kprobe(&hymofs_kprobes[i]);
 		}
+	}
 	}
 #endif
 
