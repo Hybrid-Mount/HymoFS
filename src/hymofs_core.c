@@ -92,6 +92,28 @@ static DEFINE_PER_CPU(char[HYMO_ITERATE_PATH_BUF], hymo_iterate_dir_path);
 /* Resolved once at init via kprobe; then we use it for all lookups. */
 static unsigned long (*hymofs_kallsyms_lookup_name)(const char *name);
 
+/* Validate that a kernel address is in valid range (prevents NULL and invalid ptr) */
+static bool hymofs_valid_kernel_addr(unsigned long addr)
+{
+	if (!addr)
+		return false;
+	/* Check for common error values that can be returned */
+	if (IS_ERR_VALUE(addr))
+		return false;
+	/*
+	 * On ARM64 with KASLR (GKI 5.15+), kernel addresses are in the high half
+	 * of the address space. Just check that top bits are set (kernel space).
+	 * Be permissive - let the kernel's own checks catch truly invalid addresses.
+	 */
+#if defined(CONFIG_64BIT)
+	/* Any address with top bit set is in kernel space on 64-bit */
+	return (addr & (1UL << 63)) != 0;
+#else
+	/* 32-bit kernel space */
+	return addr >= PAGE_OFFSET;
+#endif
+}
+
 /*
  * Resolve kernel symbol by name. We do NOT rely on the kernel exporting
  * anything: first try to get kallsyms_lookup_name itself via kprobe, then
@@ -101,18 +123,27 @@ HYMO_NOCFI unsigned long hymofs_lookup_name(const char *name)
 {
 	if (hymofs_kallsyms_lookup_name) {
 		unsigned long addr = hymofs_kallsyms_lookup_name(name);
-		if (addr)
+		if (addr && !IS_ERR_VALUE(addr))
 			return addr;
 	}
 	/* Fallback: kprobe on the target symbol gives us its address */
 	{
 		struct kprobe kp = { .symbol_name = name };
 		unsigned long addr;
+		int ret;
 
-		if (register_kprobe(&kp) < 0)
+		ret = register_kprobe(&kp);
+		if (ret < 0) {
+			pr_alert("hymofs: kprobe %s failed: %d\n", name, ret);
 			return 0;
+		}
 		addr = (unsigned long)kp.addr;
 		unregister_kprobe(&kp);
+		/* Just check for NULL and error values, trust kernel kprobe result */
+		if (!addr || IS_ERR_VALUE(addr)) {
+			pr_alert("hymofs: symbol %s returned invalid addr 0x%lx\n", name, addr);
+			return 0;
+		}
 		return addr;
 	}
 }
@@ -121,12 +152,24 @@ HYMO_NOCFI unsigned long hymofs_lookup_name(const char *name)
 static void hymofs_resolve_kallsyms_lookup(void)
 {
 	struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
+	int ret;
 
-	if (register_kprobe(&kp) < 0)
+	pr_alert("hymofs: resolving kallsyms_lookup_name...\n");
+	ret = register_kprobe(&kp);
+	if (ret < 0) {
+		pr_alert("hymofs: kprobe kallsyms_lookup_name failed: %d, using per-symbol kprobe\n", ret);
 		return;
+	}
+	if (!hymofs_valid_kernel_addr((unsigned long)kp.addr)) {
+		pr_alert("hymofs: kallsyms_lookup_name returned invalid address: 0x%lx\n",
+			(unsigned long)kp.addr);
+		unregister_kprobe(&kp);
+		return;
+	}
 	hymofs_kallsyms_lookup_name = (void *)kp.addr;
 	unregister_kprobe(&kp);
-	pr_info("hymofs: using kallsyms_lookup_name for symbol resolution\n");
+	pr_alert("hymofs: kallsyms_lookup_name resolved @ 0x%lx\n",
+		(unsigned long)hymofs_kallsyms_lookup_name);
 }
 
 /* Constants & data structures are in hymofs_lkm.h */
@@ -1838,6 +1881,28 @@ static int hymo_no_tracepoint_param;
 module_param_named(hymo_no_tracepoint, hymo_no_tracepoint_param, int, 0600);
 MODULE_PARM_DESC(hymo_no_tracepoint, "1=skip sys_enter tracepoint, use kprobe. 0=try tracepoint first (default).");
 
+/* Debug: skip various initialization stages to isolate crash */
+static int hymo_skip_vfs_param;
+module_param_named(hymo_skip_vfs, hymo_skip_vfs_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_vfs, "1=skip VFS hooks (ftrace+kprobes). For debugging crash.");
+
+static int hymo_skip_extra_kprobes_param;
+module_param_named(hymo_skip_extra_kprobes, hymo_skip_extra_kprobes_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_extra_kprobes, "1=skip extra kprobes (reboot,prctl,uname,cmdline). For debugging.");
+
+static int hymo_skip_getfd_param;
+module_param_named(hymo_skip_getfd, hymo_skip_getfd_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_getfd, "1=skip GET_FD kprobe/tracepoint. For debugging crash.");
+
+static int hymo_skip_kallsyms_param;
+module_param_named(hymo_skip_kallsyms, hymo_skip_kallsyms_param, int, 0600);
+MODULE_PARM_DESC(hymo_skip_kallsyms, "1=skip kallsyms resolution, use per-symbol kprobe. For GKI compatibility.");
+
+/* Dummy mode: exit immediately after first log - for testing module loading */
+static int hymo_dummy_mode_param;
+module_param_named(hymo_dummy_mode, hymo_dummy_mode_param, int, 0600);
+MODULE_PARM_DESC(hymo_dummy_mode, "1=exit immediately after init starts (for testing).");
+
 /* Per-CPU: when set, kretprobe will replace return value with this fd. */
 static DEFINE_PER_CPU(int, hymo_override_fd);
 static DEFINE_PER_CPU(int, hymo_override_active);
@@ -3315,11 +3380,28 @@ static struct kretprobe hymo_krp_vfs_getxattr;
 
 static int __init hymofs_lkm_init(void)
 {
-	pr_info("hymofs: initializing LKM v%s\n", HYMOFS_VERSION);
+	/* Use pr_alert for early logging - more likely to survive crash */
+	pr_alert("hymofs: === INIT START v%s ===\n", HYMOFS_VERSION);
+
+	/* Dummy mode: exit immediately - for testing module loading itself */
+	if (hymo_dummy_mode_param) {
+		pr_alert("hymofs: DUMMY MODE - exiting immediately\n");
+		return 0;
+	}
+
+	pr_alert("hymofs: skip_kallsyms=%d skip_vfs=%d skip_extra=%d skip_getfd=%d\n",
+		hymo_skip_kallsyms_param, hymo_skip_vfs_param,
+		hymo_skip_extra_kprobes_param, hymo_skip_getfd_param);
+
+	pr_alert("hymofs: STAGE 1: resolving kallsyms\n");
 
 	/* Resolve kallsyms first - broader symbol access than kprobe on some GKI kernels. */
-	hymofs_resolve_kallsyms_lookup();
+	if (!hymo_skip_kallsyms_param)
+		hymofs_resolve_kallsyms_lookup();
+	else
+		pr_alert("hymofs: skipping kallsyms (using per-symbol kprobe)\n");
 
+	pr_alert("hymofs: STAGE 2: resolving VFS symbols\n");
 	/*
 	 * Resolve ALL VFS symbols via kallsyms/kprobe - GKI kernels protect these
 	 * behind namespaces or don't export them at all.
@@ -3369,6 +3451,7 @@ static int __init hymofs_lkm_init(void)
 	if (!hymo_d_absolute_path && !hymo_dentry_path_raw)
 		pr_warn("hymofs: neither d_absolute_path nor dentry_path_raw found, inject/merge listing disabled\n");
 
+	pr_alert("hymofs: STAGE 3: initializing hash tables\n");
 	/* Initialize hash tables */
 	hash_init(hymo_paths);
 	hash_init(hymo_targets);
@@ -3377,6 +3460,7 @@ static int __init hymofs_lkm_init(void)
 	hash_init(hymo_xattr_sbs);
 	hash_init(hymo_merge_dirs);
 
+	pr_alert("hymofs: STAGE 4: resolving /system path\n");
 	/* Resolve /system device number for stat spoofing */
 	if (hymo_kern_path) {
 		struct path sys_path;
@@ -3390,10 +3474,12 @@ static int __init hymofs_lkm_init(void)
 		}
 	}
 
+	pr_alert("hymofs: STAGE 5: registering tracepoints\n");
 	/* Try tracepoint for path redirect + GET_FD first. Tracepoint supports multiple listeners (KSU + HymoFS can coexist). */
 	if (!hymo_no_tracepoint_param)
 		(void)hymofs_tracepoint_path_init();
 
+	pr_alert("hymofs: STAGE 6: registering GET_FD kprobes\n");
 	/* GET_FD: use tracepoint if available, else kprobe */
 	if (hymo_syscall_nr_param <= 0) {
 		pr_err("hymofs: hymo_syscall_nr must be positive (got %d)\n", hymo_syscall_nr_param);
@@ -3560,6 +3646,7 @@ static int __init hymofs_lkm_init(void)
 	}
 	}
 
+	pr_alert("hymofs: STAGE 7: registering VFS hooks\n");
 #if HYMOFS_VFS_KPROBES
 	/* Install VFS hooks: try ftrace (entry) + kretprobe (exit) first,
 	 * fallback to kprobe+kretprobe. getname_flags always uses kprobe. */

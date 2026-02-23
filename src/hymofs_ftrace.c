@@ -52,17 +52,28 @@ extern int hymo_kp_iterate_dir_pre(struct kprobe *p, struct pt_regs *regs);
 static void hymo_ftrace_callback(unsigned long ip, unsigned long parent_ip,
 				struct ftrace_ops *op, struct ftrace_regs *fregs)
 {
-	struct pt_regs *regs = ftrace_get_regs(fregs);
+	struct pt_regs *regs;
 	struct hymo_ftrace_slot *slot;
 	int depth, type = -1;
 	static struct kprobe kp_dummy;
 
 	(void)parent_ip;
 	(void)op;
+
+	/* Defensive: verify fregs is valid */
+	if (!fregs)
+		return;
+
+	regs = ftrace_get_regs(fregs);
 	if (!regs)
 		return;
+
+	/* Check if any ftrace addresses are registered */
+	if (!hymo_ft_addr[0] && !hymo_ft_addr[1] && !hymo_ft_addr[2] && !hymo_ft_addr[3])
+		return;
+
 	depth = this_cpu_read(hymo_ftrace_depth);
-	if (depth >= HYMO_FTRACE_SLOT_DEPTH)
+	if (depth >= HYMO_FTRACE_SLOT_DEPTH || depth < 0)
 		return;
 
 	if (ip == hymo_ft_addr[0])
@@ -146,8 +157,11 @@ int hymofs_ftrace_try_register(unsigned long addr[4])
 
 	for (i = 0; i < 4; i++) {
 		addr[i] = hymofs_lookup_name(ft_syms[i]);
-		if (!addr[i])
+		/* vfs_getxattr is optional */
+		if (!addr[i] && i < 3)
 			return -ENOENT;
+		if (addr[i] && IS_ERR_VALUE(addr[i]))
+			return -EINVAL;
 	}
 	for (i = 0; i < 4; i++)
 		hymo_ft_addr[i] = addr[i];
