@@ -12,6 +12,7 @@
 #define _HYMOFS_LKM_H
 
 #include <linux/types.h>
+#include <asm/ptrace.h>
 #include <linux/list.h>
 #include <linux/hashtable.h>
 #include <linux/xarray.h>
@@ -214,6 +215,16 @@ struct hymofs_filldir_wrapper {
 	struct dentry *merge_target_dentries[HYMO_MAX_MERGE_TARGETS];
 };
 
+/* kretprobe instance data for iterate_dir (ftrace slot / kprobe mode) */
+struct hymo_iterate_ri_data {
+	int did_swap;
+	struct hymofs_filldir_wrapper *wrapper;
+};
+
+/* Per-CPU state for iterate_dir; defined in hymofs_core.c, used by hymofs_ftrace.c */
+DECLARE_PER_CPU(struct hymofs_filldir_wrapper, hymo_iterate_wrapper);
+DECLARE_PER_CPU(int, hymo_iterate_did_swap);
+
 /* ======================================================================
  * Logging
  * ====================================================================== */
@@ -228,5 +239,12 @@ extern bool hymo_debug_enabled;
 
 /* Called by syscall handler (e.g. KP) when userspace requests HYMO_CMD_GET_FD. Returns anon fd or negative errno. */
 int hymofs_get_anon_fd(void);
+
+void hymofs_handle_sys_enter_path(struct pt_regs *regs, long id);
+void hymofs_handle_sys_enter_getfd(struct pt_regs *regs, long id);
+void hymofs_handle_sys_exit_getfd(struct pt_regs *regs, long ret);
+
+/* Symbol lookup (resolved via kprobe, no kernel export needed) */
+unsigned long hymofs_lookup_name(const char *name);
 
 #endif /* _HYMOFS_LKM_H */
