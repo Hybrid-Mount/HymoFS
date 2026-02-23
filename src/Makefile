@@ -4,8 +4,9 @@ obj-m += hymofs_lkm.o
 hymofs_lkm-objs := hymofs_core.o hymofs_tracepoint.o hymofs_ftrace.o
 
 ccflags-y += -gz=none
-# Do NOT add -fno-sanitize=cfi here: init/exit must have kernel-expected CFI type for
-# do_one_initcall. Use HYMO_NOCFI only on functions that make indirect calls to resolved symbols.
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
 	rm -rf .tmp_versions
