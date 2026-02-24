@@ -332,6 +332,18 @@ static void hymofs_mark_dir_has_inject(const char *path_str)
  * Part 9: Cleanup
  * ====================================================================== */
 
+static void hymo_clear_inode_flags_for_path(const char *path_str, unsigned int bit)
+{
+	struct path p;
+	if (!path_str || !hymo_kern_path)
+		return;
+	if (hymo_kern_path(path_str, LOOKUP_FOLLOW, &p) != 0)
+		return;
+	if (p.dentry && d_inode(p.dentry) && d_inode(p.dentry)->i_mapping)
+		clear_bit(bit, &d_inode(p.dentry)->i_mapping->flags);
+	path_put(&p);
+}
+
 static void hymo_cleanup_locked(void)
 {
 	struct hymo_entry *entry;
@@ -342,17 +354,23 @@ static void hymo_cleanup_locked(void)
 	struct hlist_node *tmp;
 	int bkt;
 
+	hymofs_enabled = false;
+
 	hash_for_each_safe(hymo_paths, bkt, tmp, entry, node) {
+		hymo_clear_inode_flags_for_path(entry->src, AS_FLAGS_HYMO_HIDE);
 		hlist_del_rcu(&entry->node);
 		hlist_del_rcu(&entry->target_node);
 		call_rcu(&entry->rcu, hymo_entry_free_rcu);
 	}
 	hash_for_each_safe(hymo_hide_paths, bkt, tmp, hide_entry, node) {
+		hymo_clear_inode_flags_for_path(hide_entry->path, AS_FLAGS_HYMO_HIDE);
 		hlist_del_rcu(&hide_entry->node);
 		call_rcu(&hide_entry->rcu, hymo_hide_entry_free_rcu);
 	}
 	xa_destroy(&hymo_allow_uids_xa);
 	hash_for_each_safe(hymo_inject_dirs, bkt, tmp, inject_entry, node) {
+		hymo_clear_inode_flags_for_path(inject_entry->dir,
+						AS_FLAGS_HYMO_DIR_HAS_INJECT);
 		hlist_del_rcu(&inject_entry->node);
 		call_rcu(&inject_entry->rcu, hymo_inject_entry_free_rcu);
 	}
@@ -573,14 +591,12 @@ static HYMO_NOCFI void hymofs_populate_injected_list(const char *dir_path, struc
 		}
 	}
 
-	if (should_inject) {
-		/* Use original src path for hymo_paths prefix scan.
-		 * Prefer match_src (from merge rule), then dpath_dir (d_path form
-		 * matching ADD_RULE entries), then dir_path as fallback. */
-		const char *pfx = match_src ? match_src :
-				  dpath_dir ? dpath_dir : dir_path;
-		size_t pfx_len = match_src ? match_src_len :
-				 dpath_dir ? dpath_dir_len : dir_len;
+	if (should_inject && match_src) {
+		/* Only scan hymo_paths when a merge rule matched. For simple
+		 * ADD_RULE redirects the source is hidden and getname_flags
+		 * handles the redirect transparently — no injection needed. */
+		const char *pfx = match_src;
+		size_t pfx_len = match_src_len;
 
 		hash_for_each_rcu(hymo_paths, bkt, entry, node) {
 			if (strncmp(entry->src, pfx, pfx_len) != 0)
@@ -1624,17 +1640,13 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			hymofs_mark_dir_has_inject(parent_dir);
 		}
 
-		/* Inode marking: hide source in dir listing; mark parent for fast filldir skip. */
-		if (src_inode) {
-			hymofs_mark_inode_hidden(src_inode);
+		/* Do not mark redirect source as hidden: we do not inject a virtual
+		 * entry for simple ADD_RULE, so hiding would make the file disappear
+		 * from the listing. Open of the path is still redirected via getname. */
+		if (src_inode)
 			iput(src_inode);
-		}
-		if (parent_inode) {
-			if (parent_inode->i_mapping)
-				set_bit(AS_FLAGS_HYMO_DIR_HAS_HIDDEN,
-					&parent_inode->i_mapping->flags);
+		if (parent_inode)
 			iput(parent_inode);
-		}
 
 		mutex_lock(&hymo_config_mutex);
 		hymofs_enabled = true;
@@ -1757,8 +1769,41 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		break;
 	}
 
-	case HYMO_IOC_DEL_RULE:
+	case HYMO_IOC_DEL_RULE: {
+		struct inode *del_inode = NULL;
+		struct inode *del_parent_inode = NULL;
+
 		if (!src) { ret = -EINVAL; break; }
+
+		/* Resolve symlinks so the path matches what ADD_RULE stored */
+		if (hymo_kern_path) {
+			struct path dpath;
+			if (hymo_kern_path(src, LOOKUP_FOLLOW, &dpath) == 0) {
+				char *rbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+				if (rbuf && hymo_d_path) {
+					char *res = hymo_d_path(&dpath, rbuf, PATH_MAX);
+					if (!IS_ERR(res) && res[0] == '/') {
+						char *resolved = kstrdup(res, GFP_KERNEL);
+						if (resolved) {
+							kfree(src);
+							src = resolved;
+						}
+					}
+				}
+				if (d_inode(dpath.dentry)) {
+					del_inode = d_inode(dpath.dentry);
+					hymo_ihold(del_inode);
+				}
+				if (dpath.dentry->d_parent &&
+				    d_inode(dpath.dentry->d_parent)) {
+					del_parent_inode = d_inode(dpath.dentry->d_parent);
+					hymo_ihold(del_parent_inode);
+				}
+				kfree(rbuf);
+				path_put(&dpath);
+			}
+		}
+
 		hash = full_name_hash(NULL, src, strlen(src));
 		mutex_lock(&hymo_config_mutex);
 
@@ -1796,7 +1841,17 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		}
 del_done:
 		mutex_unlock(&hymo_config_mutex);
+		if (del_inode) {
+			if (del_inode->i_mapping)
+				clear_bit(AS_FLAGS_HYMO_HIDE,
+					  &del_inode->i_mapping->flags);
+			iput(del_inode);
+		}
+		if (del_parent_inode) {
+			iput(del_parent_inode);
+		}
 		break;
+	}
 
 	default:
 		ret = -EINVAL;
@@ -2358,6 +2413,9 @@ hymofs_filldir_filter(struct dir_context *ctx, const char *name,
 			if (cinode && cinode->i_mapping &&
 			    test_bit(AS_FLAGS_HYMO_HIDE,
 				     &cinode->i_mapping->flags)) {
+				hymo_log("filldir HIDE: %.*s (ino=%lu)\n",
+					 namlen, name,
+					 cinode->i_ino);
 				dput(child);
 				return HYMO_FILLDIR_CONTINUE;
 			}
