@@ -867,6 +867,11 @@ static char *(*hymo_strndup_user)(const char __user *, long);
 static struct filename *(*hymo_getname_kernel)(const char *);
 static void (*hymo_ihold)(struct inode *);
 
+/* KSU allowlist API (YukiSU/KernelSU PR #3093): bool ksu_get_allow_list(int *, u16, u16 *, u16 *, bool) */
+typedef bool (*hymo_ksu_get_allow_list_fn)(int *array, u16 length, u16 *out_length,
+					   u16 *out_total, bool allow);
+static hymo_ksu_get_allow_list_fn hymo_ksu_get_allow_list_ptr;
+
 static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 {
 	struct file *fp;
@@ -876,12 +881,47 @@ static HYMO_NOCFI bool hymo_reload_ksu_allowlist(void)
 	struct hymo_app_profile profile;
 	int count = 0;
 
-	/* VFS symbols not available on this kernel - skip allowlist */
-	if (!hymo_filp_open || !hymo_kernel_read)
-		return false;
-
 	if (!mutex_trylock(&hymo_config_mutex))
 		return false;
+
+	/* Prefer live KSU allowlist API (new signature with out_length/out_total) when available */
+	if (hymofs_kallsyms_lookup_name && !hymo_ksu_get_allow_list_ptr) {
+		unsigned long addr = hymofs_kallsyms_lookup_name("ksu_get_allow_list");
+
+		if (addr && hymofs_valid_kernel_addr(addr))
+			hymo_ksu_get_allow_list_ptr = (hymo_ksu_get_allow_list_fn)addr;
+	}
+	if (hymo_ksu_get_allow_list_ptr) {
+		int *arr = kmalloc(HYMO_ALLOWLIST_UID_MAX * sizeof(int), GFP_KERNEL);
+
+		if (arr) {
+			u16 out_len = 0, out_total = 0;
+			bool ok = hymo_ksu_get_allow_list_ptr(arr,
+							     (u16)HYMO_ALLOWLIST_UID_MAX,
+							     &out_len, &out_total, true);
+
+			if (ok) {
+				xa_destroy(&hymo_allow_uids_xa);
+				hymo_allowlist_loaded = true;
+				for (count = 0; count < out_len && count < HYMO_ALLOWLIST_UID_MAX; count++)
+					if (arr[count] > 0)
+						hymo_add_allow_uid((uid_t)arr[count]);
+				if (out_len < out_total)
+					hymo_log("allowlist truncated at %u (total %u)\n",
+						 out_len, out_total);
+				kfree(arr);
+				mutex_unlock(&hymo_config_mutex);
+				return true;
+			}
+			kfree(arr);
+		}
+	}
+
+	/* Fallback: read allowlist from file (VFS symbols required) */
+	if (!hymo_filp_open || !hymo_kernel_read) {
+		mutex_unlock(&hymo_config_mutex);
+		return false;
+	}
 
 	fp = hymo_filp_open(HYMO_KSU_ALLOWLIST_PATH, O_RDONLY, 0);
 	if (IS_ERR(fp)) {
