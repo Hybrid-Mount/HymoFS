@@ -43,6 +43,7 @@
 #include <linux/mount.h>
 #include <linux/xattr.h>
 #include <linux/seq_file.h>
+#include <uapi/linux/magic.h>
 #include <asm/unistd.h>
 #include "hymofs_lkm.h"
 #include "hymofs_ftrace.h"
@@ -237,6 +238,7 @@ static int hymo_getxattr_kprobe_registered;
 static int hymo_mount_hide_vfsmnt_registered;
 static int hymo_mount_hide_mountinfo_registered;
 static int hymo_mount_hide_read_fallback_registered;
+static int hymo_statfs_kretprobe_registered;
 
 /* Forward declarations for hymo_export_hooks_status (HYMO_IOC_GET_HOOKS) */
 static int hymo_ni_kprobe_registered;
@@ -261,6 +263,8 @@ static char *(*hymo_d_absolute_path)(const struct path *, char *, int);
 static char *(*hymo_dentry_path_raw)(const struct dentry *, char *, int);
 static char *(*hymo_d_path)(const struct path *, char *, int);
 static struct dentry *(*hymo_d_hash_and_lookup)(struct dentry *, const struct qstr *);
+/* d_real_inode: get real (e.g. lower) inode for overlay; used for statfs f_type passthrough */
+static struct inode *(*hymo_d_real_inode)(struct dentry *);
 /* path_put, dput, dget, iput, iterate_dir: use kernel exports directly (EXPORT_SYMBOL), no lookup */
 
 /* vfs_getxattr addr for resolving source path's SELinux context (set when xattr kretprobe registered) */
@@ -1420,6 +1424,8 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 			features |= HYMO_FEATURE_MOUNT_HIDE;
 		if (hymo_mount_hide_read_fallback_registered)
 			features |= HYMO_FEATURE_MAPS_SPOOF;
+		if (hymo_statfs_kretprobe_registered)
+			features |= HYMO_FEATURE_STATFS_SPOOF;
 		if (copy_to_user(arg, &features, sizeof(features)))
 			return -EFAULT;
 		return 0;
@@ -1513,6 +1519,12 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 				     "maps: kretprobe (read buffer filter)\n");
 		else
 			n = scnprintf(kbuf + written, buf_size - written, "maps: none\n");
+		written += n;
+		if (hymo_statfs_kretprobe_registered)
+			n = scnprintf(kbuf + written, buf_size - written,
+				     "statfs: kretprobe (f_type spoof for INCONSISTENT_MOUNT)\n");
+		else
+			n = scnprintf(kbuf + written, buf_size - written, "statfs: none\n");
 		written += n;
 
 		list_arg.size = written;
@@ -2770,6 +2782,90 @@ static struct kretprobe hymo_krp_read_mount_filter = {
 	.maxactive = 64,
 };
 
+/* statfs f_type spoof: make direct (statfs) match resolved (mountinfo) to avoid INCONSISTENT_MOUNT.
+ * We resolve the real (lower) fs type at statfs entry via d_real_inode and pass it through in ret.
+ * OVERLAYFS_SUPER_MAGIC from uapi/linux/magic.h so we use the running kernel's definition. */
+
+struct hymo_statfs_ri_data {
+	void __user *buf;
+	unsigned long spoof_f_type; /* real (lower) s_magic; 0 = do not spoof */
+};
+
+static int hymo_statfs_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct hymo_statfs_ri_data *d = (struct hymo_statfs_ri_data *)ri->data;
+	const char __user *pathname;
+#if defined(__aarch64__)
+	d->buf = (void __user *)regs->regs[1];
+	pathname = (const char __user *)regs->regs[0];
+#elif defined(__x86_64__)
+	d->buf = (void __user *)regs->si;
+	pathname = (const char __user *)regs->di;
+#else
+	d->buf = NULL;
+	pathname = NULL;
+#endif
+	d->spoof_f_type = 0;
+	if (!pathname || !hymo_kern_path || !hymo_d_real_inode)
+		return 0;
+	{
+		char path_buf[HYMO_MAX_LEN_PATHNAME];
+		struct path p;
+		struct inode *real_ino;
+		unsigned int n;
+
+		n = copy_from_user(path_buf, pathname, sizeof(path_buf) - 1);
+		path_buf[sizeof(path_buf) - 1] = '\0';
+		if (n != 0)
+			return 0;
+		if (hymo_kern_path(path_buf, 0, &p) != 0)
+			return 0;
+		if ((unsigned long)p.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC) {
+			real_ino = hymo_d_real_inode(p.dentry);
+			if (real_ino && real_ino->i_sb != p.dentry->d_sb)
+				d->spoof_f_type = (unsigned long)real_ino->i_sb->s_magic;
+		}
+		path_put(&p);
+	}
+	return 0;
+}
+
+static int hymo_statfs_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	long ret;
+#if defined(__aarch64__)
+	ret = (long)regs->regs[0];
+#elif defined(__x86_64__)
+	ret = (long)regs->ax;
+#else
+	return 0;
+#endif
+	if (ret < 0)
+		return 0;
+	{
+		struct hymo_statfs_ri_data *d = (struct hymo_statfs_ri_data *)ri->data;
+		void __user *buf = d->buf;
+		u64 f_type;
+
+		if (!buf || d->spoof_f_type == 0)
+			return 0;
+		if (copy_from_user(&f_type, buf, sizeof(f_type)))
+			return 0;
+		if ((f_type & 0xffffffffUL) == OVERLAYFS_SUPER_MAGIC) {
+			f_type = (f_type & 0xffffffff00000000UL) | (d->spoof_f_type & 0xffffffffUL);
+			(void)copy_to_user(buf, &f_type, sizeof(f_type));
+		}
+	}
+	return 0;
+}
+
+static struct kretprobe hymo_krp_statfs = {
+	.entry_handler = hymo_statfs_entry,
+	.handler = hymo_statfs_ret,
+	.data_size = sizeof(struct hymo_statfs_ri_data),
+	.maxactive = 64,
+};
+
 /* kretprobe fallback for cmdline when tracepoint unavailable */
 static int hymo_cmdline_read_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
@@ -4020,6 +4116,9 @@ static int __init hymofs_lkm_init(void)
 		pr_warn("hymofs: d_path not found, path resolution in populate/merge/hide may fail\n");
 	if (!hymo_d_hash_and_lookup)
 		pr_warn("hymofs: d_hash_and_lookup not found, merge dedup and hide filter disabled\n");
+	hymo_d_real_inode = (void *)hymofs_lookup_name("d_real_inode");
+	if (!hymo_d_real_inode)
+		pr_warn("hymofs: d_real_inode not found, statfs f_type passthrough (real lower fs) disabled\n");
 	if (!hymo_filp_open || !hymo_kernel_read)
 		pr_warn("hymofs: filp_open/kernel_read not found, allowlist disabled\n");
 	if (!hymo_vfs_getattr || !hymo_dentry_open)
@@ -4259,6 +4358,34 @@ static int __init hymofs_lkm_init(void)
 					use_read_path = true;
 					pr_info("hymofs: mount hide via kretprobe on %s (read buffer filter, preferred)\n",
 						read_syms[i]);
+					/* statfs f_type spoof so direct matches resolved (INCONSISTENT_MOUNT) */
+					{
+						static const char *statfs_syms[] = {
+#if defined(__aarch64__)
+							"__arm64_sys_statfs", "sys_statfs", NULL
+#elif defined(__x86_64__)
+							"__x64_sys_statfs", "sys_statfs", NULL
+#else
+							NULL
+#endif
+						};
+						unsigned long statfs_addr = 0;
+						int j;
+
+						for (j = 0; statfs_syms[j]; j++) {
+							statfs_addr = hymofs_lookup_name(statfs_syms[j]);
+							if (statfs_addr)
+								break;
+						}
+						if (statfs_addr) {
+							hymo_krp_statfs.kp.addr = (kprobe_opcode_t *)statfs_addr;
+							if (register_kretprobe(&hymo_krp_statfs) == 0) {
+								hymo_statfs_kretprobe_registered = 1;
+								pr_info("hymofs: statfs f_type spoof via kretprobe on %s\n",
+									statfs_syms[j]);
+							}
+						}
+					}
 				} else {
 					vfree(hymo_read_filter_buf);
 					hymo_read_filter_buf = NULL;
@@ -4502,6 +4629,8 @@ static void __exit hymofs_lkm_exit(void)
 {
 	pr_info("hymofs: shutting down\n");
 
+	if (hymo_statfs_kretprobe_registered)
+		unregister_kretprobe(&hymo_krp_statfs);
 	if (hymo_mount_hide_read_fallback_registered) {
 		unregister_kretprobe(&hymo_krp_read_mount_filter);
 		if (hymo_read_filter_buf) {
