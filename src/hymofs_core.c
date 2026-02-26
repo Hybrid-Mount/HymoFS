@@ -242,6 +242,9 @@ static int hymo_getxattr_kprobe_registered;
 static int hymo_mount_hide_vfsmnt_registered;
 static int hymo_mount_hide_mountinfo_registered;
 static int hymo_mount_hide_read_fallback_registered;
+
+/* Per-feature enable mask: 1 = enabled. Default all enabled. */
+static int hymo_feature_enabled_mask = 0xFFFFFFFF;
 static int hymo_statfs_kretprobe_registered;
 
 /* Forward declarations for hymo_export_hooks_status (HYMO_IOC_GET_HOOKS) */
@@ -1412,6 +1415,42 @@ static int hymo_dispatch_cmd(unsigned int cmd, void __user *arg)
 		return 0;
 	}
 
+	if (cmd == HYMO_IOC_SET_MOUNT_HIDE) {
+		struct hymo_mount_hide_arg a;
+		if (copy_from_user(&a, arg, sizeof(a)))
+			return -EFAULT;
+		if (a.enable)
+			hymo_feature_enabled_mask |= HYMO_FEATURE_MOUNT_HIDE;
+		else
+			hymo_feature_enabled_mask &= ~HYMO_FEATURE_MOUNT_HIDE;
+		/* path_pattern reserved for future custom hide rules */
+		return 0;
+	}
+
+	if (cmd == HYMO_IOC_SET_MAPS_SPOOF) {
+		struct hymo_maps_spoof_arg a;
+		if (copy_from_user(&a, arg, sizeof(a)))
+			return -EFAULT;
+		if (a.enable)
+			hymo_feature_enabled_mask |= HYMO_FEATURE_MAPS_SPOOF;
+		else
+			hymo_feature_enabled_mask &= ~HYMO_FEATURE_MAPS_SPOOF;
+		/* reserved for future inline rule */
+		return 0;
+	}
+
+	if (cmd == HYMO_IOC_SET_STATFS_SPOOF) {
+		struct hymo_statfs_spoof_arg a;
+		if (copy_from_user(&a, arg, sizeof(a)))
+			return -EFAULT;
+		if (a.enable)
+			hymo_feature_enabled_mask |= HYMO_FEATURE_STATFS_SPOOF;
+		else
+			hymo_feature_enabled_mask &= ~HYMO_FEATURE_STATFS_SPOOF;
+		/* path/spoof_f_type reserved for future custom mappings */
+		return 0;
+	}
+
 	if (cmd == HYMO_IOC_GET_FEATURES) {
 		int features = 0;
 		if (hymo_uname_kprobe_registered)
@@ -2452,6 +2491,9 @@ static int hymo_mount_hide_pre(struct kprobe *p, struct pt_regs *regs)
 	struct super_block *sb;
 	struct file_system_type *fstype;
 
+	if (!(hymo_feature_enabled_mask & HYMO_FEATURE_MOUNT_HIDE))
+		return 0;
+
 #if defined(__aarch64__)
 	mnt = (struct vfsmount *)regs->regs[1];
 #elif defined(__x86_64__)
@@ -2739,7 +2781,8 @@ static int hymo_read_mount_filter_ret(struct kretprobe_instance *ri, struct pt_r
 	}
 
 	/* /proc/.../mountinfo or /proc/mounts: filter overlay lines */
-	if (strncmp(path_buf, "/proc/", 6) == 0 &&
+	if ((hymo_feature_enabled_mask & HYMO_FEATURE_MOUNT_HIDE) &&
+	    strncmp(path_buf, "/proc/", 6) == 0 &&
 	    (strstr(path_buf, "mountinfo") || strstr(path_buf, "/mounts"))) {
 		free_page((unsigned long)path_buf);
 		new_len = hymo_filter_overlay_lines(hymo_read_filter_buf, (size_t)ret);
@@ -2757,7 +2800,8 @@ static int hymo_read_mount_filter_ret(struct kretprobe_instance *ri, struct pt_r
 	}
 
 	/* /proc/.../maps or .../smaps: spoof ino/dev/pathname by rule */
-	if (strncmp(path_buf, "/proc/", 6) == 0 &&
+	if ((hymo_feature_enabled_mask & HYMO_FEATURE_MAPS_SPOOF) &&
+	    strncmp(path_buf, "/proc/", 6) == 0 &&
 	    (strstr(path_buf, "/maps") || strstr(path_buf, "/smaps"))) {
 		free_page((unsigned long)path_buf);
 		new_len = hymo_filter_maps_lines(hymo_read_filter_buf, (size_t)ret);
@@ -2810,7 +2854,8 @@ static int hymo_statfs_entry(struct kretprobe_instance *ri, struct pt_regs *regs
 	pathname = NULL;
 #endif
 	d->spoof_f_type = 0;
-	if (!pathname || !hymo_kern_path || !hymo_d_real_inode)
+	if (!(hymo_feature_enabled_mask & HYMO_FEATURE_STATFS_SPOOF) ||
+	    !pathname || !hymo_kern_path || !hymo_d_real_inode)
 		return 0;
 	{
 		char path_buf[HYMO_MAX_LEN_PATHNAME];

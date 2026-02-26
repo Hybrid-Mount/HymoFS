@@ -140,6 +140,32 @@ struct hymo_maps_rule {
 	int err;
 };
 
+/*
+ * Feature config structs - enable + reserved for future custom rules.
+ * mount_hide: path_pattern empty = hide all overlay; non-empty = hide only matching (future).
+ * maps_spoof: rules via ADD_MAPS_RULE; struct allows future inline rule.
+ * statfs_spoof: path empty = auto spoof; non-empty = custom path->f_type (future).
+ */
+struct hymo_mount_hide_arg {
+	int enable;
+	char path_pattern[HYMO_MAX_LEN_PATHNAME];  /* reserved: empty = all overlay */
+	int err;
+};
+
+struct hymo_maps_spoof_arg {
+	int enable;
+	/* reserved for future: inline rule, batch config */
+	char reserved[sizeof(struct hymo_maps_rule)];
+	int err;
+};
+
+struct hymo_statfs_spoof_arg {
+	int enable;
+	char path[HYMO_MAX_LEN_PATHNAME];  /* reserved: empty = auto */
+	unsigned long spoof_f_type;         /* reserved: 0 = use d_real_inode */
+	int err;
+};
+
 // ioctl definitions (for fd-based mode)
 // Must be after struct definitions
 #define HYMO_IOC_MAGIC 'H'
@@ -165,5 +191,8 @@ struct hymo_maps_rule {
 #define HYMO_IOC_GET_HOOKS          _IOWR(HYMO_IOC_MAGIC, 22, struct hymo_syscall_list_arg)
 #define HYMO_IOC_ADD_MAPS_RULE     _IOW(HYMO_IOC_MAGIC, 23, struct hymo_maps_rule)
 #define HYMO_IOC_CLEAR_MAPS_RULES   _IO(HYMO_IOC_MAGIC, 24)
+#define HYMO_IOC_SET_MOUNT_HIDE     _IOW(HYMO_IOC_MAGIC, 25, struct hymo_mount_hide_arg)
+#define HYMO_IOC_SET_MAPS_SPOOF    _IOW(HYMO_IOC_MAGIC, 26, struct hymo_maps_spoof_arg)
+#define HYMO_IOC_SET_STATFS_SPOOF  _IOW(HYMO_IOC_MAGIC, 27, struct hymo_statfs_spoof_arg)
 
 #endif /* _LINUX_HYMO_MAGIC_H */
