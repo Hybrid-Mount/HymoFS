@@ -49,7 +49,7 @@ jobs:
           echo "Size after stripping: $(du -h "/github/workspace/out/$OUTPUT_NAME" | cut -f1)"
 
       - name: Upload hymofs_lkm.ko artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.kmi }}_hymofs_lkm.ko
           path: /github/workspace/out/${{ matrix.kmi }}_hymofs_lkm.ko
@@ -61,14 +61,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all LKM artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: '*_hymofs_lkm.ko'
           path: lkm
           merge-multiple: true
 
       - name: Upload combined LKM artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: hymofs-lkm-all
           path: lkm/
